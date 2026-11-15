@@ -11,7 +11,9 @@ Settings come from, in order of precedence (last wins):
    confusions, and one with `[[page_types]]` needs `pages.head_chars`.
 3. Environment: `ZONTOLOGIZE_<SECTION>__<KEY>`, for example `ZONTOLOGIZE_EXTRACT__THREADS=4`.
    Deeper keys add another `__` (`ZONTOLOGIZE_PROVIDERS__OLLAMA__THINK=true`). A value is read
-   as TOML, except for keys that hold text, which take it as is.
+   as TOML, except for keys that hold text, which take it as is. A key of one `[[sources]]`
+   entry takes its name: `ZONTOLOGIZE_SOURCES__<NAME>__<KEY>`, for example
+   `ZONTOLOGIZE_SOURCES__ARCHIVE__ROOT=/data/archive`; the entry must exist.
 4. Command-line flags.
 
 An unknown key or bad value stops the run before it touches the database.
@@ -67,6 +69,7 @@ hashed), `size` and `modified` (timestamp). `ignore` and `[scan.kinds]` apply to
 | `database.graph` | `"zontologize_graph"` | AGE graph that `graph sync` rebuilds; must differ from the schemas |
 | `database.api_schema` | `"zontologize_api"` | Schema of the views for apps, made by `db migrate` |
 | `database.max_connections` | `8` | Connection pool size |
+| `database.decisions` | `""` | `schema.view` with human decisions for `decisions apply` (see `docs/consumers.md`); empty: none |
 | `ontology.files` | `[]` | Turtle files, relative to the config directory |
 | `ontology.languages` | `["en"]` | Label languages, first preferred |
 | `ontology.include` / `exclude` | `[]` | Root classes to select / leave out |

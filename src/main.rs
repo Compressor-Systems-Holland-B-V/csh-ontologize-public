@@ -63,6 +63,8 @@ enum Command {
         about = "Send clusters of proposed same-as links to the curate model and write its merges, classes and names"
     )]
     Curate(JobArgs),
+    #[command(subcommand, about = "Human decisions from a consumer app")]
+    Decisions(DecisionsCommand),
     #[command(subcommand, about = "Evaluation commands")]
     Eval(EvalCommand),
     #[command(subcommand, about = "Fact review commands")]
@@ -74,6 +76,14 @@ enum Command {
     },
     #[command(name = "extract-worker", hide = true)]
     ExtractWorker,
+}
+
+#[derive(Debug, Subcommand)]
+enum DecisionsCommand {
+    #[command(
+        about = "Apply the decisions of database.decisions and print a JSON report per decision"
+    )]
+    Apply,
 }
 
 #[derive(Debug, Subcommand)]
@@ -456,6 +466,9 @@ fn main() -> ExitCode {
             }
             Command::Resolve => zontologize::resolve(config).await,
             Command::Curate(args) => zontologize::curate(config, &args.options()).await,
+            Command::Decisions(DecisionsCommand::Apply) => {
+                zontologize::decisions_apply(config).await
+            }
             Command::Eval(EvalCommand::Entities) => zontologize::eval_entities(config).await,
             Command::Eval(EvalCommand::Embed {
                 models,

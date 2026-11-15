@@ -502,7 +502,7 @@ fn changed_roots(entities: &[EntityRow], roots: &HashMap<i64, i64>) -> (Vec<i64>
         .unzip()
 }
 
-async fn canonical_with(
+pub(crate) async fn canonical_with(
     conn: &mut PgConnection,
     entities: &[EntityRow],
     stats: &mut Stats,

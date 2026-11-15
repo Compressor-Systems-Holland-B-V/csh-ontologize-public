@@ -3,6 +3,7 @@ pub mod attributes;
 pub mod classify;
 pub mod contents;
 pub mod curate;
+pub mod decisions;
 pub mod documents;
 pub mod embed;
 pub mod entities;

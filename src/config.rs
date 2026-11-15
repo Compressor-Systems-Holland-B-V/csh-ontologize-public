@@ -347,6 +347,7 @@ pub struct DatabaseConfig {
     pub graph: String,
     pub api_schema: String,
     pub max_connections: u32,
+    pub decisions: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -630,6 +631,28 @@ fn env_layer(name: &str, raw: &str, merged: &Table) -> Result<Layer> {
     if parts.iter().any(String::is_empty) {
         bail!("{name}: expected the form ZONTOLOGIZE_<SECTION>__<KEY>");
     }
+    if let [section, source, key] = parts.as_slice()
+        && section == "sources"
+    {
+        let mut sources = merged
+            .get("sources")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let entry = sources
+            .iter_mut()
+            .filter_map(Value::as_table_mut)
+            .find(|entry| entry.get("name").and_then(Value::as_str) == Some(source))
+            .with_context(|| format!("{name}: no [[sources]] entry is named {source:?}"))?;
+        let value = env_value(raw, entry.get(key));
+        entry.insert(key.clone(), value);
+        let mut table = Table::new();
+        table.insert("sources".to_string(), Value::Array(sources));
+        return Ok(Layer {
+            source: name.to_string(),
+            table,
+        });
+    }
     let mut value = env_value(raw, existing(merged, &parts));
     for part in parts.iter().rev() {
         let mut table = Table::new();
@@ -722,6 +745,12 @@ fn check(config: &Config) -> Result<(), String> {
     }
     if config.database.max_connections == 0 {
         return Err("database.max_connections must be greater than 0".to_string());
+    }
+    if !config.database.decisions.is_empty()
+        && !matches!(config.database.decisions.split_once('.'),
+            Some((schema, view)) if is_identifier(schema) && is_identifier(view))
+    {
+        return Err("database.decisions must be empty or schema.view".to_string());
     }
     if config.ontology.languages.is_empty() {
         return Err("ontology.languages must list at least one language".to_string());
@@ -1321,6 +1350,24 @@ mod tests {
         let config = load_from(None, env).unwrap();
         assert_eq!(config.fit.seed, "42");
         assert!(config.providers.ollama.think);
+    }
+
+    #[test]
+    fn env_sets_a_key_of_one_named_source() {
+        let dir = dir_with(
+            "[[sources]]\nname = \"a\"\nroot = \"/a\"\n\n[[sources]]\nname = \"media\"\nroot = \"/old\"\n",
+        );
+        let env = vars(&[("ZONTOLOGIZE_SOURCES__MEDIA__ROOT", "/new/media")]);
+        let config = load_from(Some(dir.path()), env).unwrap();
+        let roots: Vec<(&str, &str)> = config
+            .sources
+            .iter()
+            .map(|s| (s.name.as_str(), s.root.as_str()))
+            .collect();
+        assert_eq!(roots, [("a", "/a"), ("media", "/new/media")]);
+        let env = vars(&[("ZONTOLOGIZE_SOURCES__OTHER__ROOT", "/x")]);
+        let message = error(load_from(Some(dir.path()), env));
+        assert!(message.contains("\"other\""), "{message}");
     }
 
     #[test]

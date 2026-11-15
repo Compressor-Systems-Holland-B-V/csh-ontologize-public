@@ -1,5 +1,5 @@
 create or replace function {api}.contract_version() returns integer
-    language sql immutable as 'select 6';
+    language sql immutable as 'select 7';
 
 create or replace view {api}.sources as
 select id, name, kind, root, dataset
@@ -143,7 +143,8 @@ select a.id, a.entity_id, a.property_iri, a.value_text, a.unit_text, a.unit_iri,
 from {schema}.attributes a
 join {schema}.chunks k on k.id = a.chunk_id
 where exists (select 1 from {schema}.documents d
-    where d.content_id = k.content_id and d.status = 'present');
+    where d.content_id = k.content_id and d.status = 'present')
+and not exists (select 1 from {schema}.hidden_attributes h where h.attribute_id = a.id);
 
 create or replace view {api}.class_ancestors as
 with recursive up (iri, ancestor, depth) as (
