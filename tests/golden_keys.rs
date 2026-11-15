@@ -47,7 +47,7 @@ fn scan_stage_keys_are_unchanged() {
     let config = config();
     assert_eq!(
         extract_key(&config.extract, &config.ocr),
-        "extract-v2 xberg-1.3.10 paddleocr small nl+en markdown embedded-0-10mb-ocr-false visual-plain-words"
+        "extract-v7 xberg-1.3.10 paddleocr small nl+en markdown embedded-0-10mb-ocr-false visual-words-text-scanned-pages-auto-rotate"
     );
     assert_eq!(
         ChunkSettings::new(&config.chunk, config.extract.format).key,

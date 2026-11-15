@@ -4,6 +4,7 @@ pub mod config;
 pub mod cpu;
 pub mod curate;
 pub mod db;
+pub mod decisions;
 pub mod embed;
 pub mod eval;
 pub mod export;
@@ -375,6 +376,12 @@ pub async fn eval_embed(
 ) -> Result<ExitCode> {
     let path = embed::eval::run(config_dir, database_url().as_deref(), options).await?;
     println!("eval embed: report in {}", path.display());
+    Ok(ExitCode::SUCCESS)
+}
+
+pub async fn decisions_apply(config_dir: Option<&Path>) -> Result<ExitCode> {
+    let report = decisions::run(config_dir, database_url().as_deref()).await?;
+    println!("{}", serde_json::to_string(&report)?);
     Ok(ExitCode::SUCCESS)
 }
 

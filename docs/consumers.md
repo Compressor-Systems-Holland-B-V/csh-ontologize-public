@@ -53,13 +53,67 @@ and others not yet; each document is always complete. `select * from zontologize
 shows `running`, `running_since`, `last_scan_finished_at`, `ontology_version` and
 `contract_version`.
 
+## Human decisions
+
+`zontologize decisions apply` reads the decisions of a consumer from the view in
+`[database] decisions` (for example `app_api.decisions`) and leaves the tables as the
+machine facts plus those decisions. It is a full sync: a decision that left the view is undone.
+It never touches rows it did not write, such as links confirmed with `review merges`, and prints
+one JSON line: `{"applied": N, "problems": N, "decisions": [{"id": 1, "outcome": "applied"}]}`.
+Outcomes: `applied`, `not_found` (a thing or fact is not there), `document` (the source file is
+not there), `class`, `property`, `unit` (the unit is not known for the property), `value` (no
+number), `kind`.
+
+The view has one row per decision: `id`, `kind`, `class_iri` and `key` of the thing (the class
+as `canonical_entities` shows it), `other_class_iri` and `other_key`, `property_iri`, `verdict`
+(`right` or `wrong`), `value`, `old_value`, `source` and `path` of a document, `page`.
+
+| `kind` | Uses | Applied as |
+|---|---|---|
+| `same` | other thing, verdict | a `sameAs` link with method `human`, confirmed or rejected; machine links between the two follow it |
+| `name` | value | the shown name (the old one stays an alias) |
+| `alias` | value | an alias with method `human` |
+| `class` | value (a class IRI) | the shown class |
+| `fact` | property, other thing, verdict | every fact between the two confirmed or rejected |
+| `add_fact` | property, other thing, document, page | a relation with method `human`, confirmed, `props.page` |
+| `value` | property, value, old value, document, page | the old value hidden from `attributes`, the new one read with the ontology's units |
+
+Run it before and after `resolve` (since contract 7).
+
+## Page readings
+
+A consumer that reads its own uploads by the same rules can select text in either the same
+way. A page reading is:
+
+- **Frame:** the page as shown. For a PDF that is the CropBox (inside the MediaBox) turned by
+  `/Rotate`, in points; for an image, the pixels after the EXIF orientation. `width` and
+  `height` give that frame.
+- **Words:** `[start, end, x0, y0, x1, y1]`, with `start` and `end` char offsets into the page
+  text and the box 0-1 in the frame, from the top left.
+- **Text built from the words:** the page text is the words in reading order, a space within a
+  line and a line break between lines, so `text[start:end]` is always the word. A word without
+  a box stays in the text without an entry in `words`.
+- **When to read the picture:** a page with no text layer, or one that is mostly a picture with
+  little text on it (a scan with a stamped header), is read by OCR; otherwise the text layer
+  is used (xberg's `ScannedPages` strategy).
+- **Turned scans:** the text of a turned or sideways scan is read upright, and the boxes are
+  turned back into the frame shown. zontologize lets xberg turn the pixels (`auto_rotate`) and turns the boxes back: for an image by the turn xberg reports; for a PDF
+  page, where xberg does not report it and may read a scan's picture as stored rather than as
+  drawn, by laying the words over a small render of the page as shown at each possible turn
+  and keeping the one that puts clearly the most ink under them. A close call or a cropped
+  scan keeps its text without words.
+
+`tests/fixtures/pages` holds made-up pages with their expected words (`make.py` writes them):
+a turned PDF, an offset CropBox, an EXIF photo, a turned, a sideways and an upside-down scan,
+a scan drawn turned upright, a scan with a stamped header and two scans at different resolutions; `tests/pages.rs` must pass them.
+
 ## Views
 
 | View | Holds |
 |---|---|
 | `sources` | Configured sources |
 | `documents` | Files that are not deleted; `status` is `present`, `skipped` (not read) or `error` |
-| `pages`, `chunks` | Text per content (`content_id`); `chunks.tsv` for full-text search without stemming (IDs), `chunks.tsv_stem` with Dutch and English stemming (since contract 3). For PDF and image pages, `pages.width` and `pages.height` give the page size (PDF points after `/Rotate`, image pixels) and `pages.words` the words as `[[start, end, x0, y0, x1, y1], ...]`: char offsets into `pages.text` and a 0-1 box with a top-left origin; all three are null for other pages (since contract 6) |
+| `pages`, `chunks` | Text per content (`content_id`); `chunks.tsv` for full-text search without stemming (IDs), `chunks.tsv_stem` with Dutch and English stemming (since contract 3). For PDF and image pages, `pages.width` and `pages.height` give the page size (PDF points of the CropBox after `/Rotate`, image pixels after the EXIF orientation) and `pages.words` the words as `[[start, end, x0, y0, x1, y1], ...]`: char offsets into `pages.text` and a 0-1 box with a top-left origin; all three are null for other pages (since contract 6). Since 1.4.0 the boxes are in the page as shown (CropBox, `/Rotate`, EXIF orientation), the words of turned text on a turned page are kept, and an OCR page of a multi-page file without its own raster frame gets no words; the extract stage version went up (3), so the next `scan` reads every file again. Also since 1.4.0 a PDF or image page follows [Page readings](#page-readings): its text is built from its words and a page that is mostly a scan is read by OCR; the extract stage version is 7 |
 | `entities` | Things found; `canonical_id` groups duplicates |
 | `aliases` | Other names of an entity |
 | `canonical_entities` | One row per cluster of merged entities (since contract 4): the root's `id`, `class_iri`, `key`, `name`, `props`, `dataset`, `document_id`, `members` (rows in the cluster) and `aliases` (names of the other members and all their aliases). `class_iri` and `name` come from the root's `entity_classes` row when it takes effect; a cluster whose root is not an entity is left out, and so are members that are not an entity |
@@ -68,7 +122,7 @@ shows `running`, `running_since`, `last_scan_finished_at`, `ontology_version` an
 | `mentions`, `class_mentions` | Where an entity or class is named: chunk or document, span, method, confidence |
 | `mention_pages` | Chunk mentions on their page: `mention_id`, `entity_id`, `content_id`, `page_no`, and `span_start`/`span_end` as char offsets into that page's `pages.text`, end clipped to the page (since contract 6) |
 | `relations` | Facts between entities, without rejected ones; `status` is `auto`, `proposed` or `confirmed` |
-| `attributes` | Values of entities: `value_text` as found, `unit_text`, `unit_iri`, `low`/`high` as written and `si_low`/`si_high` in SI units, chunk, span, method, confidence; `superseded` when a newer revision replaces the document |
+| `attributes` | Values of entities: `value_text` as found, `unit_text`, `unit_iri`, `low`/`high` as written and `si_low`/`si_high` in SI units, chunk, span, method, confidence; `superseded` when a newer revision replaces the document; a value hidden by a human decision is left out (since contract 7) |
 | `units` | Units of the ontology: symbols, labels, `dimension`, `conversion_multiplier`, `conversion_offset` |
 | `classes`, `properties` | The selected ontology the facts use; attribute properties have `value_kind`, `quantity_kind`, `dimension`; `classes.privacy_category` (since contract 3) says how a class is hidden, from `zontologize:privacyCategory` |
 | `class_ancestors` | `iri`, `ancestor`, `depth` (0 is the class itself) |
