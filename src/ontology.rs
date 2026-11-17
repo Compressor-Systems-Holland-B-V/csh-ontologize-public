@@ -1009,7 +1009,27 @@ impl Ontology {
     }
 
     pub fn fits(&self, class: &str, bounds: &[String]) -> bool {
-        bounds.iter().any(|bound| self.is_a(class, bound))
+        bounds.iter().any(|bound| self.within(class, bound))
+    }
+
+    fn within(&self, class: &str, bound: &str) -> bool {
+        let mut stack = vec![class];
+        let mut seen = BTreeSet::new();
+        while let Some(iri) = stack.pop() {
+            if iri == bound {
+                return true;
+            }
+            if !seen.insert(iri) {
+                continue;
+            }
+            if let Some(class) = self.classes.get(iri) {
+                if class.types.iter().any(|t| t == bound) {
+                    return true;
+                }
+                stack.extend(class.parents.iter().map(String::as_str));
+            }
+        }
+        false
     }
 
     pub fn resolve(&self, name: &str) -> Result<String, String> {
@@ -1305,6 +1325,24 @@ mod tests {
         assert!(!ontology.is_a(&iri("Site"), &iri("EquipmentClass")));
         assert!(ontology.classes[&iri("EquipmentClass")].meta);
         assert!(!ontology.classes[&iri("Pump")].meta);
+    }
+
+    #[test]
+    fn domains_follow_subclasses_and_one_type_step() {
+        let text = "ex:EquipmentClass a owl:Class .\n\
+            ex:Pump a owl:Class, ex:EquipmentClass .\n\
+            ex:FirePump a owl:Class ; rdfs:subClassOf ex:Pump .\n\
+            ex:PumpModel a owl:Class, ex:Pump .\n";
+        let loaded = load_text(&[text], &config(&[], &[]));
+        let ontology = &loaded.ontology;
+        let iri = |name: &str| format!("http://example.org/onto#{name}");
+        let equipment = [iri("EquipmentClass")];
+        assert!(ontology.fits(&iri("Pump"), &equipment));
+        assert!(ontology.fits(&iri("FirePump"), &equipment));
+        assert!(ontology.fits(&iri("FirePump"), &[iri("Pump")]));
+        assert!(ontology.is_a(&iri("PumpModel"), &iri("EquipmentClass")));
+        assert!(!ontology.fits(&iri("PumpModel"), &equipment));
+        assert!(ontology.fits(&iri("PumpModel"), &[iri("Pump")]));
     }
 
     #[test]

@@ -8,6 +8,7 @@ pub mod documents;
 pub mod embed;
 pub mod entities;
 pub mod entity_classes;
+pub mod eval;
 pub mod facts;
 pub mod fit;
 pub mod graph;

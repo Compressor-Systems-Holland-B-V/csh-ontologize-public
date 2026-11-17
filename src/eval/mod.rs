@@ -1,5 +1,9 @@
+pub mod draft;
+pub mod gold;
+pub mod judge;
+
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Result, anyhow, bail};
 
@@ -34,7 +38,13 @@ pub struct Score {
     pub right_class: usize,
 }
 
+pub const WORLD_FILE: &str = "world.csv";
+
 impl Score {
+    pub fn found_rate(&self) -> f64 {
+        ratio(self.found, self.world)
+    }
+
     pub fn duplicate_rate(&self) -> f64 {
         ratio(self.duplicates, self.found)
     }
@@ -97,6 +107,14 @@ pub fn parse_world(name: &str, text: &str, ontology: &Ontology) -> Result<Vec<Wo
             names.len() - 1
         });
         names[at].variants.insert(key);
+    }
+    // The name itself is a variant too ("Mr. Arthur van Kesteren" is listed, "Arthur van Kesteren"
+    // is what an entity is called), unless it is listed as another name's variant.
+    for name in &mut names {
+        let key = normalise(&name.name);
+        if owner.get(&key).is_none_or(|first| *first == name.name) {
+            name.variants.insert(key);
+        }
     }
     Ok(names)
 }
@@ -185,15 +203,16 @@ pub fn table(scores: &[Score]) -> String {
         .unwrap_or(5)
         .max(5);
     let mut out = format!(
-        "{:<width$}  {:>6}  {:>6}  {:>9}  {:>6}  {:>12}  {:>9}\n",
-        "class", "world", "found", "dup rate", "extra", "wrong merges", "class acc"
+        "{:<width$}  {:>6}  {:>6}  {:>8}  {:>9}  {:>6}  {:>12}  {:>9}\n",
+        "class", "world", "found", "found %", "dup rate", "extra", "wrong merges", "class acc"
     );
     for s in scores {
         out.push_str(&format!(
-            "{:<width$}  {:>6}  {:>6}  {:>8.1}%  {:>6}  {:>12}  {:>8.1}%\n",
+            "{:<width$}  {:>6}  {:>6}  {:>7.1}%  {:>8.1}%  {:>6}  {:>12}  {:>8.1}%\n",
             s.class,
             s.world,
             s.found,
+            s.found_rate() * 100.0,
             s.duplicate_rate() * 100.0,
             s.extra_clusters,
             s.wrong_merges,
@@ -203,14 +222,46 @@ pub fn table(scores: &[Score]) -> String {
     out
 }
 
-pub async fn run(config_dir: Option<&Path>, url: Option<&str>) -> Result<Vec<Score>> {
-    let config = crate::config::load(config_dir)?;
-    if config.eval.world.is_empty() {
-        bail!("[eval] world is empty; set it to the world list (name,variant,class)");
+pub fn world_path(
+    config_dir: Option<&Path>,
+    eval_dir: &str,
+    set: Option<&str>,
+    world: Option<&Path>,
+) -> Result<PathBuf> {
+    if let Some(world) = world {
+        return Ok(world.to_path_buf());
     }
-    let path = crate::scan::resolve_root(config_dir, &config.eval.world);
-    let text = std::fs::read_to_string(&path)
-        .map_err(|e| anyhow!("reading {} ([eval] world): {e}", path.display()))?;
+    let Some(set) = set else {
+        bail!("give --set <name> (the frozen gold of eval draft) or --world <file>");
+    };
+    gold::check_set(set)?;
+    let set_dir = crate::scan::resolve_root(config_dir, eval_dir).join(set);
+    let Some(dir) = gold::latest(&set_dir)? else {
+        bail!(
+            "no frozen version of set {set} in {}; run zontologize eval draft --set {set} --what world",
+            set_dir.display()
+        );
+    };
+    let path = dir.join(WORLD_FILE);
+    if !path.exists() {
+        bail!(
+            "{} is missing; run zontologize eval draft --set {set} --what world",
+            path.display()
+        );
+    }
+    Ok(path)
+}
+
+pub async fn run(
+    config_dir: Option<&Path>,
+    url: Option<&str>,
+    set: Option<&str>,
+    world: Option<&Path>,
+) -> Result<Vec<Score>> {
+    let config = crate::config::load(config_dir)?;
+    let path = world_path(config_dir, &config.eval.dir, set, world)?;
+    let text =
+        std::fs::read_to_string(&path).map_err(|e| anyhow!("reading {}: {e}", path.display()))?;
     let ontology = crate::ontology::load_or_empty(config_dir, &config.ontology)?;
     let world = parse_world(&path.display().to_string(), &text, &ontology)?;
     let pool = db::pool::connect(url, &config.database.schema, 2).await?;
@@ -225,7 +276,18 @@ pub async fn run(config_dir: Option<&Path>, url: Option<&str>) -> Result<Vec<Sco
             names,
         })
         .collect();
-    Ok(score(&world, &entities, &ontology))
+    let scores = score(&world, &entities, &ontology);
+    if !config.eval.summary.is_empty() {
+        let summary = crate::scan::resolve_root(config_dir, &config.eval.summary);
+        let body = format!(
+            "Against `{}`.\n\n```\n{}```\n",
+            path.display(),
+            table(&scores)
+        );
+        gold::write_section(&summary, "Gold list", &body)?;
+        println!("eval entities: written to {}", summary.display());
+    }
+    Ok(scores)
 }
 
 #[cfg(test)]
@@ -322,6 +384,25 @@ Eastport,Eastport,ex:Site
         let scores = score(&world(), &entities, &ontology());
         assert_eq!(scores[1].class, "ex:Site");
         assert_eq!(scores[1].found, 1);
+    }
+
+    #[test]
+    fn the_name_itself_matches_too() {
+        let text = "name,variant,class\nJan de Vries,Mr. J. de Vries,ex:Org\nAcme,Acme,ex:Org\nAcme BV,jan de vries,ex:Org\n";
+        let world = parse_world("w.csv", text, &ontology()).unwrap();
+        assert!(world[0].variants.contains("mr. j. de vries"));
+        assert!(
+            !world[0].variants.contains("jan de vries"),
+            "owned by Acme BV"
+        );
+        let text = "name,variant,class\nJan de Vries,Mr. J. de Vries,ex:Org\n";
+        let world = parse_world("w.csv", text, &ontology()).unwrap();
+        let scores = score(
+            &world,
+            &[entity(1, 1, "Org", &["Jan de Vries"])],
+            &ontology(),
+        );
+        assert_eq!(scores[0].found, 1);
     }
 
     #[test]

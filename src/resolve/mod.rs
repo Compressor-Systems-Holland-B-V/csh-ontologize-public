@@ -2,7 +2,7 @@ pub mod documents;
 pub mod names;
 pub mod similar;
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
 use std::time::Instant;
 
@@ -12,7 +12,7 @@ use sqlx::{PgConnection, PgPool};
 
 use crate::config::Config;
 use crate::db;
-use crate::db::resolve::{EntityRow, Link, NewLink, REFERENCES, REPLACES, SAME_AS};
+use crate::db::resolve::{EntityRow, Link, MENTIONED_IN, NewLink, REFERENCES, REPLACES, SAME_AS};
 use crate::ontology::Ontology;
 use crate::rules::Rules;
 
@@ -189,9 +189,14 @@ fn name_pairs(
         }
         let score = names::similarity(&a.key, &b.key);
         if score >= config.resolve.fuzzy_score {
+            let same_class = a.row.class_iri == b.row.class_iri;
             let candidate = Candidate {
                 rule: "fuzzy",
-                status: PROPOSED,
+                status: if same_class && score >= config.resolve.fuzzy_auto {
+                    AUTO
+                } else {
+                    PROPOSED
+                },
                 score,
             };
             offer(&mut pairs, a.row.id, b.row.id, candidate);
@@ -258,6 +263,179 @@ fn number_pairs(
             offer(pairs, item.row.id, target, candidate);
         }
     }
+}
+
+fn number_links(
+    items: &[Eligible],
+    entities: &[EntityRow],
+    rules: &Rules,
+    ontology: &Ontology,
+) -> BTreeSet<(i64, String, i64)> {
+    let by_key: HashMap<(&str, &str), i64> = entities
+        .iter()
+        .map(|e| ((e.class_iri.as_str(), e.key.as_str()), e.id))
+        .collect();
+    let mut out = BTreeSet::new();
+    for item in items {
+        for rule in &rules.numbers {
+            if !ontology.is_a(&item.row.class_iri, &rule.class) {
+                continue;
+            }
+            let (Some(key), Some((property, target))) =
+                (rule.key_of(&item.row.name), rule.link_of(&item.row.name))
+            else {
+                continue;
+            };
+            let class = rule.class.as_str();
+            if let (Some(&src), Some(&dst)) = (
+                by_key.get(&(class, key.as_str())),
+                by_key.get(&(class, target.as_str())),
+            ) {
+                out.insert((src, property.to_string(), dst));
+            }
+        }
+    }
+    out
+}
+
+async fn write_number_links(
+    conn: &mut PgConnection,
+    links: &BTreeSet<(i64, String, i64)>,
+    rules: &Rules,
+    stats: &mut Stats,
+) -> Result<()> {
+    let ids: Vec<i64> = links.iter().flat_map(|(a, _, b)| [*a, *b]).collect();
+    let sources = db::resolve::provenance(&mut *conn, &ids).await?;
+    let properties: BTreeSet<&str> = rules
+        .numbers
+        .iter()
+        .filter_map(|r| r.link_of_property())
+        .collect();
+    for property in properties {
+        let wanted = links
+            .iter()
+            .filter(|(_, p, _)| p == property)
+            .filter_map(|&(src, _, dst)| {
+                let (chunk_id, document_id) = sources
+                    .get(&src)
+                    .or_else(|| sources.get(&dst))
+                    .copied()
+                    .unwrap_or_default();
+                let document_id = if chunk_id.is_some() {
+                    None
+                } else {
+                    document_id
+                };
+                (chunk_id.is_some() || document_id.is_some()).then(|| NewLink {
+                    src_id: src,
+                    dst_id: dst,
+                    property: property.to_string(),
+                    method: method("numbers"),
+                    status: AUTO,
+                    confidence: 1.0,
+                    props: serde_json::json!({}),
+                    document_id,
+                    chunk_id,
+                    span_start: None,
+                    span_end: None,
+                })
+            })
+            .collect();
+        write_document_links(conn, property, "numbers", wanted, stats).await?;
+    }
+    Ok(())
+}
+
+fn initials_pairs(
+    items: &[Eligible],
+    rules: &Rules,
+    ontology: &Ontology,
+    orgs: &HashMap<i64, BTreeSet<i64>>,
+    max_block: usize,
+    pairs: &mut BTreeMap<(i64, i64), Candidate>,
+) {
+    let Some(persons) = &rules.persons else {
+        return;
+    };
+    let gazetteer: HashSet<(&str, &str)> = rules
+        .lexicon
+        .entries
+        .iter()
+        .map(|e| (e.class.as_str(), e.key.as_str()))
+        .collect();
+    let people: Vec<(&Eligible, Vec<names::PersonName>)> = items
+        .iter()
+        .filter(|e| ontology.is_a(&e.row.class_iri, &persons.class))
+        .map(|e| {
+            let parsed = std::iter::once(&e.key)
+                .chain(&e.alias_keys)
+                .filter_map(|k| names::person_name(k))
+                .collect();
+            (e, parsed)
+        })
+        .collect();
+    let mut blocks: BTreeMap<&str, BTreeSet<usize>> = BTreeMap::new();
+    for (i, (_, parsed)) in people.iter().enumerate() {
+        for surname in parsed.iter().flat_map(|p| &p.surnames) {
+            blocks.entry(surname).or_default().insert(i);
+        }
+    }
+    let mut compared = BTreeSet::new();
+    for block in blocks.values().filter(|b| b.len() <= max_block) {
+        for (n, &i) in block.iter().enumerate() {
+            for &j in block.iter().skip(n + 1) {
+                compared.insert((i, j));
+            }
+        }
+    }
+    let domain = |e: &Eligible| e.row.key.rsplit_once('@').map(|(_, d)| d.to_string());
+    let address = |e: &Eligible| e.row.key.contains('@');
+    let backed = |e: &Eligible| address(e) || gazetteer.contains(&(&e.row.class_iri, &e.row.key));
+    for (i, j) in compared {
+        let ((a, a_names), (b, b_names)) = (&people[i], &people[j]);
+        let variant = a_names
+            .iter()
+            .any(|x| b_names.iter().any(|y| names::same_person(x, y)));
+        let same_domain = domain(a).is_some() && domain(a) == domain(b);
+        let same_org = orgs
+            .get(&a.row.id)
+            .zip(orgs.get(&b.row.id))
+            .is_some_and(|(x, y)| !x.is_disjoint(y));
+        if a.key == b.key || !variant || !(same_domain || same_org) {
+            continue;
+        }
+        let status = if (backed(a) || backed(b)) && !(address(a) && address(b)) {
+            AUTO
+        } else {
+            PROPOSED
+        };
+        let candidate = Candidate {
+            rule: "initials",
+            status,
+            score: 1.0,
+        };
+        offer(pairs, a.row.id, b.row.id, candidate);
+    }
+}
+
+async fn works_for(
+    pool: &PgPool,
+    entities: &[EntityRow],
+    rules: &Rules,
+) -> Result<HashMap<i64, BTreeSet<i64>>> {
+    let mut out: HashMap<i64, BTreeSet<i64>> = HashMap::new();
+    let Some(persons) = &rules.persons else {
+        return Ok(out);
+    };
+    let roots: HashMap<i64, i64> = entities
+        .iter()
+        .map(|e| (e.id, e.canonical_id.unwrap_or(e.id)))
+        .collect();
+    for link in db::resolve::links(pool, persons.works_for()).await? {
+        let org = roots.get(&link.dst_id).copied().unwrap_or(link.dst_id);
+        out.entry(link.src_id).or_default().insert(org);
+    }
+    Ok(out)
 }
 
 fn exact_pairs(
@@ -549,7 +727,7 @@ fn new_key(link: &NewLink) -> (i64, i64, Option<i64>, Option<i64>) {
 
 async fn write_document_links(
     conn: &mut PgConnection,
-    property: &'static str,
+    property: &str,
     rule: &str,
     wanted: Vec<NewLink>,
     stats: &mut Stats,
@@ -609,6 +787,24 @@ async fn document_links(
         })
         .collect();
     write_document_links(conn, REFERENCES, "references", references, stats).await?;
+    let mentioned = db::resolve::mentioned_in(&mut *conn)
+        .await?
+        .into_iter()
+        .map(|m| NewLink {
+            src_id: m.src_id,
+            dst_id: m.dst_id,
+            property: MENTIONED_IN.to_string(),
+            method: method("mentions"),
+            status: AUTO,
+            confidence: 1.0,
+            props: serde_json::json!({ "mentions": m.mentions }),
+            document_id: Some(m.document_id),
+            chunk_id: None,
+            span_start: None,
+            span_end: None,
+        })
+        .collect();
+    write_document_links(conn, MENTIONED_IN, "mentions", mentioned, stats).await?;
     let documents = db::resolve::document_entities(&mut *conn).await?;
     let revisions = documents::chains(&documents, &rules.revisions)
         .into_iter()
@@ -640,6 +836,16 @@ pub async fn run_with(
     let entities = db::resolve::entities(pool).await?;
     let items = eligible(&entities, config, ontology, rules);
     let mut pairs = name_pairs(&items, &entities, config, ontology, rules);
+    let orgs = works_for(pool, &entities, rules).await?;
+    initials_pairs(
+        &items,
+        rules,
+        ontology,
+        &orgs,
+        config.resolve.max_block,
+        &mut pairs,
+    );
+    let numbers = number_links(&items, &entities, rules, ontology);
     stats.embed_skipped = embed_pairs(pool, &items, config, &mut pairs).await?;
     let mut tx = pool.begin().await?;
     write_same_as(&mut tx, &pairs, &mut stats).await?;
@@ -649,6 +855,7 @@ pub async fn run_with(
     tx.commit().await?;
     let mut tx = pool.begin().await?;
     document_links(&mut tx, ontology, rules, &mut stats).await?;
+    write_number_links(&mut tx, &numbers, rules, &mut stats).await?;
     tx.commit().await?;
     let mut tx = pool.begin().await?;
     similar::write(&mut tx, config, ontology, &mut stats).await?;
@@ -890,6 +1097,40 @@ mod tests {
     }
 
     #[test]
+    fn a_very_close_name_of_the_same_class_merges_by_itself() {
+        let ontology = crate::rules::tests::ontology();
+        let rules = crate::rules::tests::rules("").unwrap();
+        let mut config = crate::config::load(None).unwrap();
+        let rows: Vec<EntityRow> = [
+            "Northwind Engine Company Inc",
+            "Northwind Engine Company Ing",
+        ]
+        .iter()
+        .enumerate()
+        .map(|(i, name)| EntityRow {
+            id: i as i64 + 1,
+            class_iri: "http://example.org/onto#Customer".to_string(),
+            key: format!("k{i}"),
+            name: name.to_string(),
+            document_id: None,
+            canonical_id: None,
+            aliases: Vec::new(),
+        })
+        .collect();
+        let normaliser = names::Normaliser::new(&config.resolve.strip_words);
+        let items: Vec<Eligible> = rows.iter().map(|r| eligible_row(r, &normaliser)).collect();
+        let status = |config: &Config| {
+            name_pairs(&items, &rows, config, &ontology, &rules)
+                .into_values()
+                .map(|c| c.status)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(status(&config), [PROPOSED]);
+        config.resolve.fuzzy_auto = 0.97;
+        assert_eq!(status(&config), [AUTO]);
+    }
+
+    #[test]
     fn a_name_inside_another_is_a_tokens_proposal() {
         assert_eq!(
             fuzzy_pairs(&["Fabrikam", "Northwind Fabrikam"], 1000),
@@ -917,5 +1158,124 @@ mod tests {
             fuzzy_pairs(&["Alpha Pumps", "Bravo Pumps", "Pumps"], 3).len(),
             2
         );
+    }
+
+    fn project_rows(names: &[&str]) -> Vec<EntityRow> {
+        names
+            .iter()
+            .enumerate()
+            .map(|(i, name)| EntityRow {
+                id: i as i64 + 1,
+                class_iri: "http://example.org/onto#Project".to_string(),
+                key: name.to_string(),
+                name: name.to_string(),
+                document_id: None,
+                canonical_id: None,
+                aliases: Vec::new(),
+            })
+            .collect()
+    }
+
+    const NUMBER_KEYS: &str = "[[number_keys]]\nclass = \"ex:Project\"\n\
+        pattern = '(?i)^(?:W-?)?(?P<n>\\d{8})(?:-[a-z0-9]+)*(?:\\s|$)'\nkey = \"W-{n}\"\n\
+        [[number_keys]]\nclass = \"ex:Project\"\n\
+        pattern = '(?i)^SP-?(?P<n>\\d{5})(?:-[a-z0-9]+)*(?:\\s|$)'\nkey = \"SP-{n}\"\n\
+        link = { property = \"ex:forCustomer\", key = \"P-{n}\" }\n\
+        [[id_patterns]]\nclass = \"ex:Project\"\npattern = '\\bW-\\d{8}\\b'\n";
+
+    #[test]
+    fn numbers_one_digit_apart_never_pair() {
+        let ontology = crate::rules::tests::ontology();
+        let rules = crate::rules::tests::rules(NUMBER_KEYS).unwrap();
+        let config = crate::config::load(None).unwrap();
+        let rows = project_rows(&[
+            "W-20210042",
+            "W-20210032",
+            "W-20210022 Pump skid",
+            "Pump skid W-20210042",
+            "W-20210042-QP",
+            "W-2021042",
+        ]);
+        let normaliser = names::Normaliser::new(&config.resolve.strip_words);
+        let items: Vec<Eligible> = rows.iter().map(|r| eligible_row(r, &normaliser)).collect();
+        let found: Vec<(i64, i64, &str)> = name_pairs(&items, &rows, &config, &ontology, &rules)
+            .into_iter()
+            .map(|((a, b), c)| (a, b, c.rule))
+            .collect();
+        assert_eq!(found, [(1, 4, "id"), (1, 5, "id")]);
+    }
+
+    #[test]
+    fn spare_numbers_link_to_their_project_only_when_both_exist() {
+        let ontology = crate::rules::tests::ontology();
+        let rules = crate::rules::tests::rules(NUMBER_KEYS).unwrap();
+        let rows = project_rows(&["SP-12345", "P-12345", "sp12345 spares", "SP-12346"]);
+        let normaliser = names::Normaliser::new(&[]);
+        let items: Vec<Eligible> = rows.iter().map(|r| eligible_row(r, &normaliser)).collect();
+        let links: Vec<(i64, i64)> = number_links(&items, &rows, &rules, &ontology)
+            .into_iter()
+            .map(|(a, _, b)| (a, b))
+            .collect();
+        assert_eq!(links, [(1, 2)]);
+    }
+
+    fn people_pairs(rows: &[EntityRow], orgs: &[(i64, i64)]) -> Vec<(i64, i64, &'static str)> {
+        let ontology = crate::rules::tests::ontology();
+        let rules = crate::rules::tests::rules(
+            "[persons]\nclass = \"ex:Customer\"\nsent_by = \"ex:describes\"\n\
+             sent_to = \"ex:describes\"\nworks_for = \"ex:forCustomer\"\n",
+        )
+        .unwrap();
+        let normaliser = names::Normaliser::new(&[]);
+        let items: Vec<Eligible> = rows.iter().map(|r| eligible_row(r, &normaliser)).collect();
+        let mut works: HashMap<i64, BTreeSet<i64>> = HashMap::new();
+        for &(person, org) in orgs {
+            works.entry(person).or_default().insert(org);
+        }
+        let mut pairs = BTreeMap::new();
+        initials_pairs(&items, &rules, &ontology, &works, 1000, &mut pairs);
+        pairs
+            .into_iter()
+            .map(|((a, b), c)| (a, b, c.status))
+            .collect()
+    }
+
+    fn person(id: i64, key: &str, name: &str) -> EntityRow {
+        EntityRow {
+            key: key.to_string(),
+            ..entity(id, "Customer", name, &[])
+        }
+    }
+
+    #[test]
+    fn initials_and_particles_pair_people_of_one_organisation() {
+        let rows = [
+            person(1, "ruud.vandersar@acme.example", "Ruud van der Sar"),
+            person(2, "r vandersar", "r vandersar"),
+            person(3, "r v d sar", "R. v.d. Sar"),
+            person(4, "rob van der sar", "Rob van der Sar"),
+            person(5, "r.vdsar@northwind.example", "R vd Sar"),
+        ];
+        assert_eq!(
+            people_pairs(&rows, &[(1, 90), (2, 90), (3, 90), (4, 90), (5, 91)]),
+            [
+                (1, 2, AUTO),
+                (1, 3, AUTO),
+                (2, 3, PROPOSED),
+                (2, 4, PROPOSED),
+                (3, 4, PROPOSED)
+            ]
+        );
+    }
+
+    #[test]
+    fn initials_need_the_same_organisation_and_two_addresses_stay_proposed() {
+        let rows = [
+            person(1, "ruud.vandersar@acme.example", "Ruud van der Sar"),
+            person(2, "r.vandersar@acme.example", "R Vandersar"),
+            person(3, "r vandersar", "R Vandersar"),
+            person(4, "ruud", "Ruud"),
+        ];
+        assert_eq!(people_pairs(&rows, &[(4, 90)]), [(1, 2, PROPOSED)]);
     }
 }

@@ -34,6 +34,30 @@ pub struct Selected {
     pub junk: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Noise {
+    Junk,
+    Repeat,
+}
+
+pub fn noise(
+    candidate: &Candidate,
+    min_letter_share: f64,
+    min_ocr_confidence: f64,
+    seen: &mut HashSet<u64>,
+) -> Option<Noise> {
+    let low_ocr = candidate
+        .ocr_confidence
+        .is_some_and(|c| c < min_ocr_confidence);
+    if low_ocr || candidate.letters < min_letter_share {
+        return Some(Noise::Junk);
+    }
+    if !seen.insert(candidate.text_hash) {
+        return Some(Noise::Repeat);
+    }
+    None
+}
+
 pub fn text_hash(text: &str) -> u64 {
     let mut hasher = DefaultHasher::new();
     fold(text).hash(&mut hasher);
@@ -100,18 +124,16 @@ pub fn select(candidates: &[Candidate], settings: &Settings) -> Selected {
     ordered.sort_by_key(|c| c.id);
     let mut kept: Vec<&Candidate> = Vec::new();
     for candidate in ordered {
-        let low_ocr = candidate
-            .ocr_confidence
-            .is_some_and(|c| c < settings.min_ocr_confidence);
-        if low_ocr || candidate.letters < settings.min_letter_share {
-            selected.junk += 1;
-            continue;
+        match noise(
+            candidate,
+            settings.min_letter_share,
+            settings.min_ocr_confidence,
+            &mut seen,
+        ) {
+            Some(Noise::Junk) => selected.junk += 1,
+            Some(Noise::Repeat) => selected.duplicates += 1,
+            None => kept.push(candidate),
         }
-        if !seen.insert(candidate.text_hash) {
-            selected.duplicates += 1;
-            continue;
-        }
-        kept.push(candidate);
     }
     kept.sort_by_key(|c| rank(settings.seed, c.id));
     let mut per_document: HashMap<i64, usize> = HashMap::new();
@@ -175,6 +197,22 @@ mod tests {
         assert_eq!(first_folder("2021/a/b.pdf"), "2021");
         assert_eq!(first_folder("b.pdf"), "");
         assert_eq!(text_hash("The  Pump"), text_hash("the pump"));
+    }
+
+    #[test]
+    fn noise_is_junk_first_then_a_repeat_of_a_seen_text() {
+        let mut seen = HashSet::new();
+        let found = |text: &str, seen: &mut HashSet<u64>| {
+            noise(&candidate(1, 1, "a", text, true), 0.5, 0.6, seen)
+        };
+        assert_eq!(found("pump report", &mut seen), None);
+        assert_eq!(found("Pump  REPORT", &mut seen), Some(Noise::Repeat));
+        assert_eq!(found("12 34 56 x", &mut seen), Some(Noise::Junk));
+        assert_eq!(found("12 34 56 x", &mut seen), Some(Noise::Junk));
+        let mut scan = candidate(2, 2, "a", "valve report", true);
+        scan.ocr_confidence = Some(0.4);
+        assert_eq!(noise(&scan, 0.5, 0.6, &mut seen), Some(Noise::Junk));
+        assert_eq!(found("valve report", &mut seen), None);
     }
 
     #[test]

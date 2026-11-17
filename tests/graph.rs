@@ -419,7 +419,21 @@ async fn the_views_keep_their_contract() {
     let version = env
         .count(&format!("select {api}.contract_version()::bigint"))
         .await;
-    assert_eq!(version, 7);
+    assert_eq!(version, 8);
+    for (method, status, confidence, tier) in [
+        ("path", "auto", 1.0, "rule"),
+        ("resolve:name", "auto", 1.0, "rule"),
+        ("resolve:fuzzy", "proposed", 0.95, "proposal"),
+        ("llm:claude-code:sonnet", "auto", 0.9, "checked"),
+        ("curate:llm:claude-code:sonnet", "auto", 0.7, "proposal"),
+    ] {
+        let found = env
+            .count(&format!(
+                "select ({api}.tier('{method}', '{status}', {confidence}) = '{tier}')::int::bigint"
+            ))
+            .await;
+        assert_eq!(found, 1, "{method} {status} {confidence}");
+    }
 
     let documents = env
         .count(&format!("select count(*) from {api}.documents"))

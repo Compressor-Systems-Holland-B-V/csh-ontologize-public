@@ -3,20 +3,20 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
-use anyhow::{Result, bail};
+use anyhow::{Context as _, Result, bail};
 use globset::GlobSet;
 use rayon::ThreadPool;
 use sqlx::PgPool;
 
 use super::check::{check, entity_key};
-use super::{Answer, Built, ChunkInput, Context, Known, TASK, USER_VARIABLES, build};
+use super::{Answer, Built, ChunkInput, Context, Known, Lines, TASK, USER_VARIABLES, build};
 use crate::config;
 use crate::db;
 use crate::db::facts::{ChunkFacts, ChunkRow, Confidence};
 use crate::llm::ModelName;
 use crate::llm::prompt::{self, Prompt};
 use crate::llm::shortlist::counts_by_chunk;
-use crate::llm::stage::{self, Base, Chunk, Counts, Keys, Plan, Stage};
+use crate::llm::stage::{self, Base, Chunk, Counts, Keys, Plan, Skipped, Stage};
 use crate::ontology::{self, Ontology};
 use crate::resolve::names::Normaliser;
 
@@ -30,6 +30,7 @@ struct Setup<'a> {
     user: Arc<Prompt>,
     check_key: Arc<String>,
     normaliser: Arc<Normaliser>,
+    lines: Arc<Lines>,
     threads: Arc<ThreadPool>,
     out: PathBuf,
 }
@@ -88,6 +89,18 @@ pub async fn run(
     )
     .await?;
     let extract = &config.llm_extract;
+    let mut quotes = Vec::new();
+    for pattern in &extract.quote_headers {
+        quotes.push(
+            regex::Regex::new(pattern)
+                .with_context(|| format!("llm_extract.quote_headers: {pattern:?}"))?,
+        );
+    }
+    let counts = match extract.repeated_line_files > 0 || !quotes.is_empty() {
+        true => db::facts::line_files(&pool).await?,
+        false => Vec::new(),
+    };
+    let lines = Lines::new(counts, extract.repeated_line_files, quotes);
     let ontology = Arc::new(loaded.ontology);
     let setup = Setup {
         base: Base {
@@ -105,6 +118,7 @@ pub async fn run(
         },
         check_key: Arc::new(super::check_key(&ontology, &config.resolve.strip_words)),
         normaliser: Arc::new(Normaliser::new(&config.resolve.strip_words)),
+        lines: Arc::new(lines),
         ontology: ontology.clone(),
         exclude: Arc::new(exclude),
         system: Arc::new(system),
@@ -125,6 +139,7 @@ async fn inputs(
     pool: &PgPool,
     ids: &[i64],
     max_known: usize,
+    lines: &Lines,
 ) -> Result<Vec<(ChunkInput, ChunkRow)>> {
     let rows = db::facts::chunks(pool, ids).await?;
     let mut counts = counts_by_chunk(db::fit::class_counts(pool, ids).await?);
@@ -142,7 +157,7 @@ async fn inputs(
         .map(|row| {
             let input = ChunkInput {
                 id: row.id,
-                text: row.text.clone(),
+                text: lines.strip(&row.text),
                 path: row.path.clone(),
                 pages: row.pages(),
                 counts: counts.remove(&row.id).unwrap_or_default(),
@@ -159,6 +174,7 @@ async fn prepare(setup: &Setup<'_>, ids: &[i64]) -> Result<Vec<Prepared>> {
         setup.base.pool,
         ids,
         setup.base.config.llm_extract.max_known,
+        &setup.lines,
     )
     .await?;
     let config = setup.base.config;
@@ -271,6 +287,7 @@ impl Stage for Setup<'_> {
             &self.ontology,
             &self.base.config.ontology.languages,
             &self.normaliser,
+            self.base.config.llm_extract.min_tag_words,
         );
         ChunkFacts {
             chunk_id: item.chunk.id,
@@ -309,13 +326,14 @@ impl Stage for Setup<'_> {
         Ok(())
     }
 
-    async fn report(&self, job: Option<i64>) -> Result<()> {
+    async fn report(&self, job: Option<i64>, skipped: &Skipped) -> Result<()> {
         super::report::write_report(
             self.base.pool,
             &self.ontology,
             self.base.config,
             &self.out,
             job,
+            skipped,
         )
         .await
     }

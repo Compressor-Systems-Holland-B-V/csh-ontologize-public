@@ -3,6 +3,9 @@ pub mod report;
 pub mod run;
 pub mod sample;
 
+use std::collections::HashSet;
+
+use regex::Regex;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
@@ -15,7 +18,7 @@ use crate::ontology::{Ontology, PropertyKind};
 
 pub const TASK: &str = "extract";
 pub const CACHE_VERSION: u32 = 1;
-pub const CHECK_VERSION: u32 = 4;
+pub const CHECK_VERSION: u32 = 5;
 pub const DOC: &str = "doc";
 pub const USER_VARIABLES: [&str; 7] = [
     "path",
@@ -244,6 +247,68 @@ pub fn schema(
         "required": required,
         "properties": fields,
     })
+}
+
+#[derive(Debug, Default)]
+pub struct Lines {
+    pub repeated: HashSet<String>,
+    pub elsewhere: HashSet<String>,
+    pub quotes: Vec<Regex>,
+}
+
+const LINE_TRIM: [char; 3] = [' ', '\t', '\r'];
+
+impl Lines {
+    pub fn new(counts: Vec<(String, i64)>, max_files: usize, quotes: Vec<Regex>) -> Lines {
+        let mut lines = Lines {
+            quotes,
+            ..Lines::default()
+        };
+        for (line, files) in counts {
+            if max_files > 0 && files > max_files as i64 {
+                lines.repeated.insert(line.clone());
+            }
+            lines.elsewhere.insert(line);
+        }
+        lines
+    }
+
+    fn quoted_elsewhere(&self, quoted: &str) -> bool {
+        let lines: Vec<&str> = quoted
+            .lines()
+            .map(|l| l.trim_matches(LINE_TRIM))
+            .filter(|l| l.chars().any(char::is_alphabetic))
+            .collect();
+        let seen = lines
+            .iter()
+            .filter(|l| self.elsewhere.contains(**l))
+            .count();
+        !lines.is_empty() && seen * 2 > lines.len()
+    }
+
+    pub fn strip(&self, text: &str) -> String {
+        let mut text = text;
+        if let Some(start) = self
+            .quotes
+            .iter()
+            .filter_map(|q| q.find(text).map(|m| m.start()))
+            .min()
+            && start > 0
+            && self.quoted_elsewhere(&text[start..])
+        {
+            text = &text[..start];
+        }
+        let mut out = String::with_capacity(text.len());
+        for line in text.split_inclusive('\n') {
+            if !self
+                .repeated
+                .contains(line.trim_end_matches('\n').trim_matches(LINE_TRIM))
+            {
+                out.push_str(line);
+            }
+        }
+        out
+    }
 }
 
 pub fn check_key(ontology: &Ontology, strip_words: &[String]) -> String {
@@ -598,5 +663,27 @@ pub mod tests {
         let user = crate::llm::prompt::load(None, "extract-user").unwrap();
         user.check(&USER_VARIABLES).unwrap();
         assert!(user.check(&USER_VARIABLES[..6]).is_err());
+    }
+
+    #[test]
+    fn repeated_lines_and_quotes_found_elsewhere_are_not_sent() {
+        let counts = vec![
+            ("Payment within 30 days".to_string(), 12),
+            ("Pump P-1 is late".to_string(), 3),
+            ("Please send the drawing".to_string(), 2),
+            ("Regards, Ann".to_string(), 2),
+        ];
+        let quotes = vec![Regex::new("-----Original Message-----").unwrap()];
+        let lines = Lines::new(counts, 10, quotes);
+        let text = "Pump P-1 is late\r\n  Payment within 30 days \nNew text\n\
+                    -----Original Message-----\nPlease send the drawing\nRegards, Ann";
+        assert_eq!(lines.strip(text), "Pump P-1 is late\r\nNew text\n");
+        let unknown = "Hi\n-----Original Message-----\nOnly here\nRegards, Ann";
+        assert_eq!(lines.strip(unknown), unknown);
+        let off = Lines::new(vec![("Payment within 30 days".to_string(), 12)], 0, vec![]);
+        assert_eq!(
+            off.strip("Payment within 30 days\n"),
+            "Payment within 30 days\n"
+        );
     }
 }

@@ -85,6 +85,39 @@ pub fn wilson_lower(right: i64, total: i64) -> f64 {
     ((centre - margin) / (1.0 + z2 / n)).clamp(0.0, 1.0)
 }
 
+pub fn rescores(
+    kinds: &[crate::db::review::KindPrecision],
+    iris: &[Precision],
+    min_verdicts: usize,
+) -> Vec<crate::db::review::Rescore> {
+    let model = |method: &str| method.starts_with("llm:");
+    let enough = |total: i64| min_verdicts > 0 && total >= min_verdicts as i64;
+    crate::eval::judge::KINDS
+        .iter()
+        .map(|kind| {
+            let base: Vec<_> = kinds
+                .iter()
+                .filter(|k| k.kind == *kind && model(&k.method) && enough(k.total))
+                .collect();
+            let iri: Vec<_> = iris
+                .iter()
+                .filter(|r| model(&r.method) && enough(r.total))
+                .collect();
+            crate::db::review::Rescore {
+                kind,
+                methods: base.iter().map(|k| k.method.clone()).collect(),
+                base: base
+                    .iter()
+                    .map(|k| wilson_lower(k.right, k.total))
+                    .collect(),
+                iri_methods: iri.iter().map(|r| r.method.clone()).collect(),
+                iris: iri.iter().map(|r| r.iri.clone()).collect(),
+                iri_base: iri.iter().map(|r| wilson_lower(r.right, r.total)).collect(),
+            }
+        })
+        .collect()
+}
+
 pub fn measured(rows: &[Precision], method: &str, min_verdicts: usize) -> HashMap<String, f64> {
     if min_verdicts == 0 {
         return HashMap::new();
@@ -474,6 +507,48 @@ mod tests {
         let many = wilson_lower(90, 100);
         assert!(few < many && many < 0.9, "{few} {many}");
         assert!((wilson_lower(90, 100) - 0.8256).abs() < 0.001);
+    }
+
+    #[test]
+    fn rescores_use_the_kind_and_the_class_with_enough_verdicts() {
+        let kinds = vec![
+            crate::db::review::KindPrecision {
+                kind: "relation".to_string(),
+                method: "llm:claude-code:sonnet".to_string(),
+                right: 90,
+                total: 100,
+            },
+            crate::db::review::KindPrecision {
+                kind: "mention".to_string(),
+                method: "llm:claude-code:sonnet".to_string(),
+                right: 5,
+                total: 5,
+            },
+            crate::db::review::KindPrecision {
+                kind: "relation".to_string(),
+                method: "path".to_string(),
+                right: 100,
+                total: 100,
+            },
+        ];
+        let iris = vec![Precision {
+            iri: "ex:supplies".to_string(),
+            method: "llm:claude-code:sonnet".to_string(),
+            right: 40,
+            total: 40,
+        }];
+        let out = rescores(&kinds, &iris, 30);
+        let relation = out.iter().find(|r| r.kind == "relation").unwrap();
+        assert_eq!(relation.methods, ["llm:claude-code:sonnet"]);
+        assert!((relation.base[0] - wilson_lower(90, 100)).abs() < 1e-12);
+        assert_eq!(relation.iris, ["ex:supplies"]);
+        let mention = out.iter().find(|r| r.kind == "mention").unwrap();
+        assert!(mention.methods.is_empty());
+        assert!(
+            rescores(&kinds, &iris, 0)
+                .iter()
+                .all(|r| r.methods.is_empty())
+        );
     }
 
     #[test]

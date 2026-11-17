@@ -55,7 +55,7 @@ fn scan_stage_keys_are_unchanged() {
     );
     let ontology = acme_ontology(&config);
     let rules = rules::load(Some(&acme()), &ontology, &config.ontology.document_class).unwrap();
-    assert_eq!(rules.key, "rules-v5-091696416c030a1a");
+    assert_eq!(rules.key, "rules-v7-c6a5a8c54a6d5257");
 }
 
 #[test]
@@ -143,7 +143,7 @@ fn facts_cache_key_is_unchanged() {
     );
     assert_eq!(
         built.cache_key,
-        "6e5cc2187b0a27434eebf8058756c91bb50fa45426d6f7cfe0999c54ceefbe99"
+        "0c0828c8600266e4f1f950238f55c3b04e611a784e62a962d228a5a79108200e"
     );
 }
 
@@ -181,7 +181,6 @@ fn attributes_cache_key_is_unchanged() {
             class: iri("Pump"),
             name: "booster pump".to_string(),
         }],
-        doc: None,
     };
     let mut hits = matcher.hits(&input.text);
     hits.properties
@@ -193,7 +192,7 @@ fn attributes_cache_key_is_unchanged() {
     );
     assert_eq!(
         built.cache_key,
-        "47f1098fb396922e5425dc5199559253cc82266575539813ec9fef61312e798d"
+        "75b91279924c57fad8f3d97712717442fd8c8b2fa133b580394ba342f057a7c9"
     );
 }
 

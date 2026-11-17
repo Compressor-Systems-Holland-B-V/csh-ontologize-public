@@ -1,5 +1,15 @@
 create or replace function {api}.contract_version() returns integer
-    language sql immutable as 'select 7';
+    language sql immutable as 'select 8';
+
+create or replace function {api}.tier(method text, status text, confidence double precision)
+    returns text language sql immutable as $$
+    select case
+        when status = 'proposed' then 'proposal'
+        when method like 'llm:%' or method like '%:llm:%' then
+            case when confidence >= {checked} then 'checked' else 'proposal' end
+        else 'rule'
+    end
+$$;
 
 create or replace view {api}.sources as
 select id, name, kind, root, dataset
@@ -27,7 +37,7 @@ where exists (select 1 from {schema}.documents d
 
 create or replace view {api}.entities as
 select id, class_iri, key, name, props, dataset, method, confidence, document_id,
-    canonical_id
+    canonical_id, {api}.tier(method, 'auto', confidence) as tier
 from {schema}.entities;
 
 create or replace view {api}.entity_classes as
@@ -54,7 +64,10 @@ select r.id, coalesce(o.class_iri, r.class_iri) as class_iri, r.key,
         where (m.id = r.id or m.canonical_id = r.id)
         and not exists (select 1 from {schema}.entity_classes x where x.entity_id = m.id
             and x.status in ('auto', 'confirmed') and x.class_iri is null)
-    ) n where n.name <> coalesce(o.name, r.name)), array[]::text[]) as aliases
+    ) n where n.name <> coalesce(o.name, r.name)), array[]::text[]) as aliases,
+    (select case when bool_or(t = 'rule') then 'rule' when bool_or(t = 'checked') then 'checked'
+        else 'proposal' end from (select {api}.tier(m.method, 'auto', m.confidence) as t
+        from {schema}.entities m where m.id = r.id or m.canonical_id = r.id) x) as tier
 from {schema}.entities r
 left join {schema}.entity_classes o on o.entity_id = r.id and o.status in ('auto', 'confirmed')
 where (r.canonical_id is null or r.canonical_id = r.id)
@@ -62,7 +75,7 @@ where (r.canonical_id is null or r.canonical_id = r.id)
 
 create or replace view {api}.canonical_relations as
 select id, src_id, property_iri, dst_id, props, method, status, confidence, document_id,
-    chunk_id, span_start, span_end, support
+    chunk_id, span_start, span_end, support, {api}.tier(method, status, confidence) as tier
 from (
     select r.id, coalesce(a.canonical_id, a.id) as src_id, r.property_iri,
         coalesce(b.canonical_id, b.id) as dst_id, r.props, r.method, r.status, r.confidence,
@@ -110,7 +123,7 @@ from {schema}.class_mentions;
 
 create or replace view {api}.relations as
 select id, src_id, property_iri, dst_id, props, method, status, confidence, document_id,
-    chunk_id, span_start, span_end
+    chunk_id, span_start, span_end, {api}.tier(method, status, confidence) as tier
 from {schema}.relations
 where status <> 'rejected';
 
@@ -139,7 +152,8 @@ select a.id, a.entity_id, a.property_iri, a.value_text, a.unit_text, a.unit_iri,
         join {schema}.entities de on de.document_id = d.id and de.key = d.id::text
         join {schema}.relations r on r.dst_id = de.id
             and r.property_iri = 'http://purl.org/dc/terms/replaces' and r.status <> 'rejected'
-        where d.content_id = k.content_id and d.status = 'present') as superseded
+        where d.content_id = k.content_id and d.status = 'present') as superseded,
+    {api}.tier(a.method, 'auto', a.confidence) as tier
 from {schema}.attributes a
 join {schema}.chunks k on k.id = a.chunk_id
 where exists (select 1 from {schema}.documents d

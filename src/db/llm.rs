@@ -353,6 +353,26 @@ pub async fn replace_items(
     Ok(ords)
 }
 
+pub async fn replace_key_items(pool: &PgPool, job: i64, keys: &[String]) -> Result<Vec<i32>> {
+    let mut tx = pool.begin().await?;
+    sqlx::query("delete from llm_job_items where job_id = $1 and status in ('pending', 'error')")
+        .bind(job)
+        .execute(&mut *tx)
+        .await?;
+    let ords = sqlx::query_scalar(
+        "insert into llm_job_items (job_id, ord, cache_key) \
+         select $1, (select coalesce(max(ord), 0) from llm_job_items where job_id = $1) \
+         + t.n::integer, t.key from unnest($2::text[]) with ordinality as t(key, n) \
+         order by t.n returning ord",
+    )
+    .bind(job)
+    .bind(keys)
+    .fetch_all(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(ords)
+}
+
 pub async fn add_stats(pool: &PgPool, job: i64, stats: &BTreeMap<String, i64>) -> Result<()> {
     if job == 0 || stats.is_empty() {
         return Ok(());

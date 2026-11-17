@@ -142,6 +142,63 @@ pub fn blocks<T>(
     out
 }
 
+const MIN_SURNAME_CHARS: usize = 3;
+const NAME_PARTICLES: [&str; 18] = [
+    "van", "von", "de", "der", "den", "ter", "ten", "het", "du", "da", "di", "le", "vd", "v", "d",
+    "vander", "vanden", "vande",
+];
+const JOINED_PARTICLES: [&str; 16] = [
+    "vander", "vanden", "vande", "van", "von", "der", "den", "ter", "ten", "het", "vd", "de", "du",
+    "da", "di", "le",
+];
+
+#[derive(Debug, PartialEq)]
+pub struct PersonName {
+    pub given: Vec<String>,
+    pub surnames: BTreeSet<String>,
+}
+
+pub fn person_name(key: &str) -> Option<PersonName> {
+    let tokens = tokens(key);
+    let split = tokens
+        .iter()
+        .skip(1)
+        .position(|t| NAME_PARTICLES.contains(t))
+        .map_or(tokens.len().saturating_sub(1), |p| p + 1);
+    let (given, rest) = tokens.split_at(split);
+    if given.is_empty() || given.iter().any(|g| !g.chars().all(char::is_alphabetic)) {
+        return None;
+    }
+    let joined = rest.concat();
+    let bare: String = rest
+        .iter()
+        .skip_while(|t| NAME_PARTICLES.contains(t))
+        .copied()
+        .collect();
+    let stripped = JOINED_PARTICLES
+        .iter()
+        .find(|p| joined.starts_with(**p) && joined.len() - p.len() >= MIN_SURNAME_CHARS)
+        .map(|p| joined[p.len()..].to_string());
+    let surnames: BTreeSet<String> = [Some(joined), Some(bare), stripped]
+        .into_iter()
+        .flatten()
+        .filter(|s| s.chars().count() >= MIN_SURNAME_CHARS && s.chars().all(char::is_alphabetic))
+        .collect();
+    (!surnames.is_empty()).then(|| PersonName {
+        given: given.iter().map(|g| g.to_string()).collect(),
+        surnames,
+    })
+}
+
+pub fn same_person(a: &PersonName, b: &PersonName) -> bool {
+    let initial = |short: &str, long: &str| short.chars().count() == 1 && long.starts_with(short);
+    !a.surnames.is_disjoint(&b.surnames)
+        && a.given
+            .iter()
+            .zip(&b.given)
+            .all(|(x, y)| x == y || initial(x, y) || initial(y, x))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -267,5 +324,40 @@ mod tests {
         assert_eq!(acronym("nhs"), None);
         let blocks = blocks(&["nhs", "northwind harbour services"], |n| n, 4);
         assert_eq!(blocks["nhs"], [0, 1]);
+    }
+
+    fn person(name: &str) -> PersonName {
+        person_name(&plain(name)).unwrap()
+    }
+
+    #[test]
+    fn initials_and_particles_name_one_person() {
+        let full = person("Ruud van der Sar");
+        for variant in [
+            "r vandersar",
+            "R. v.d. Sar",
+            "Ruud Vandersar",
+            "R Sar",
+            "ruud van der sar",
+        ] {
+            assert!(same_person(&full, &person(variant)), "{variant}");
+        }
+        assert!(same_person(&person("Jan de Vries"), &person("Jan Vries")));
+    }
+
+    #[test]
+    fn other_initials_first_names_or_surnames_are_other_people() {
+        let full = person("Ruud van der Sar");
+        for other in [
+            "Rob van der Sar",
+            "P van der Sar",
+            "Ruud van Dijk",
+            "Ruud Ries",
+        ] {
+            assert!(!same_person(&full, &person(other)), "{other}");
+        }
+        assert!(!same_person(&person("Jan Vries"), &person("Jan Ries")));
+        assert_eq!(person_name("ruud"), None);
+        assert_eq!(person_name(""), None);
     }
 }

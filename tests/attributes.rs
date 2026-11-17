@@ -37,6 +37,11 @@ async fn setup(name: &str) -> Env {
     env
 }
 
+fn method(env: &Env) -> String {
+    let config = zontologize::config::load(Some(&env.config())).unwrap();
+    format!("llm:{}", config.models.attributes)
+}
+
 async fn attributes(env: &Env, options: &Options) -> anyhow::Result<Outcome> {
     run(Some(&env.config()), Some(&common::test_url()), options).await
 }
@@ -57,12 +62,13 @@ async fn attributes_are_written_with_si_bounds_and_a_rerun_sends_nothing() {
     assert_eq!(env.count("select count(*) from llm_calls").await, 1);
     assert_eq!(env.count("select count(*) from attributes").await, 4);
     assert_eq!(
-        env.count(
+        env.count(&format!(
             "select count(*) from attributes a join entities e on e.id = a.entity_id \
              where e.key = 'P-101' and a.property_iri = 'https://example.org/acme#ratedPower' \
              and a.si_low = 7500 and a.si_high = 7500 and a.unit_iri = \
-             'http://qudt.org/vocab/unit/KiloW' and a.method = 'llm:claude-code:haiku'"
-        )
+             'http://qudt.org/vocab/unit/KiloW' and a.method = '{}'",
+            method(&env)
+        ))
         .await,
         1
     );
@@ -214,9 +220,10 @@ async fn attributes_are_reviewed_and_reviews_set_their_confidence() {
     sqlx::query(
         "insert into fact_reviews (kind, fact_id, class_iri, property_iri, method, verdict, \
          snapshot) select 'attribute', -g, 'https://example.org/acme#Pump', \
-         'https://example.org/acme#ratedPower', 'llm:claude-code:haiku', 'right', 'x' \
+         'https://example.org/acme#ratedPower', $1, 'right', 'x' \
          from generate_series(1, 29) g",
     )
+    .bind(method(&env))
     .execute(&env.pool)
     .await
     .unwrap();

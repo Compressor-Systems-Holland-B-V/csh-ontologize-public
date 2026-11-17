@@ -86,6 +86,8 @@ zontologize graph sync      # rebuild the AGE graph
 zontologize status          # what is indexed, recent runs and errors
 ```
 
+`zontologize run` runs every stage in order, then measures the result and writes the run summary.
+
 Run the same chain from cron for each new snapshot; only changed files are processed. Model jobs
 take `--dry-run` for a cost estimate and `--max-usd` as a cap. Every command has `--help`; the
 rest (`classify`, `curate`, `review`, `eval`, `ontology export`) is listed there.

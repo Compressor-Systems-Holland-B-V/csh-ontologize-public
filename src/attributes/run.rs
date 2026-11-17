@@ -8,7 +8,7 @@ use rayon::ThreadPool;
 
 use super::check::{Limits, check};
 use super::{
-    Answer, Built, ChunkInput, Context, DOC, Hits, Matcher, Subject, TASK, USER_VARIABLES, build,
+    Answer, Built, ChunkInput, Context, Hits, Matcher, Subject, TASK, USER_VARIABLES, build,
 };
 use crate::config;
 use crate::db;
@@ -16,7 +16,7 @@ use crate::db::attributes::{ChunkValues, Eligible, Filter};
 use crate::db::facts::{ChunkRow, Confidence};
 use crate::llm::ModelName;
 use crate::llm::prompt::{self, Prompt};
-use crate::llm::stage::{self, Base, Chunk, Counts, Keys, Plan, Stage};
+use crate::llm::stage::{self, Base, Chunk, Counts, Keys, Plan, Skipped, Stage};
 use crate::ontology::{self, Ontology};
 use crate::units::UnitIndex;
 
@@ -118,8 +118,19 @@ pub async fn run(
     result
 }
 
-fn hits(matcher: &Matcher, text: &str, context: &str) -> Hits {
-    let mut hits = matcher.hits(text);
+fn worded(text: &str, min_words: usize) -> String {
+    text.lines()
+        .filter(|line| crate::text::words(line) >= min_words)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn hits(matcher: &Matcher, text: &str, context: &str, min_words: usize) -> Hits {
+    let text = worded(text, min_words);
+    if text.is_empty() {
+        return Hits::default();
+    }
+    let mut hits = matcher.hits(&text);
     if !context.is_empty() {
         hits.properties.extend(matcher.hits(context).properties);
     }
@@ -142,17 +153,6 @@ async fn prepare(setup: &Setup<'_>, ids: &[i64]) -> Result<Vec<Prepared>> {
             name: row.name,
         });
     }
-    let mut docs: HashMap<i64, Subject> = HashMap::new();
-    let mut conn = pool.acquire().await?;
-    for row in db::facts::doc_entities(&mut conn, ids).await? {
-        docs.entry(row.chunk_id).or_insert(Subject {
-            reference: DOC.to_string(),
-            entity_id: row.entity_id,
-            class: row.class_iri,
-            name: String::new(),
-        });
-    }
-    drop(conn);
     let inputs: Vec<(ChunkInput, ChunkRow)> = rows
         .into_iter()
         .map(|row| {
@@ -163,7 +163,6 @@ async fn prepare(setup: &Setup<'_>, ids: &[i64]) -> Result<Vec<Prepared>> {
                 path: row.path.clone(),
                 pages: row.pages(),
                 known: known.remove(&row.id).unwrap_or_default(),
-                doc: docs.remove(&row.id),
             };
             (input, row)
         })
@@ -182,9 +181,14 @@ async fn prepare(setup: &Setup<'_>, ids: &[i64]) -> Result<Vec<Prepared>> {
         model: setup.base.name,
     };
     let matcher = setup.matcher;
+    let min_words = config.attributes.min_line_words;
     let built = crate::cpu::blocking(|| {
         crate::cpu::map(&setup.threads, &inputs, |(input, _)| {
-            build(&context, input, &hits(matcher, &input.text, &input.context))
+            build(
+                &context,
+                input,
+                &hits(matcher, &input.text, &input.context, min_words),
+            )
         })
     });
     Ok(built
@@ -201,7 +205,13 @@ async fn prepare(setup: &Setup<'_>, ids: &[i64]) -> Result<Vec<Prepared>> {
 }
 
 fn text_hit(setup: &Setup<'_>, chunk: &Eligible) -> bool {
-    !hits(setup.matcher, &chunk.text, &chunk.context).is_empty()
+    !hits(
+        setup.matcher,
+        &chunk.text,
+        &chunk.context,
+        setup.base.config.attributes.min_line_words,
+    )
+    .is_empty()
 }
 
 impl Stage for Setup<'_> {
@@ -371,14 +381,27 @@ impl Stage for Setup<'_> {
         Ok(())
     }
 
-    async fn report(&self, job: Option<i64>) -> Result<()> {
+    async fn report(&self, job: Option<i64>, skipped: &Skipped) -> Result<()> {
         super::report::write_report(
             self.base.pool,
             self.ontology,
             self.base.config,
             &self.out,
             job,
+            skipped,
         )
         .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_lines_with_enough_words_count_for_a_hit() {
+        let text = "| 12 | 3.5 kW | 400 |\n| Rated power | 250 kW |\n| 7 | 8 |";
+        assert_eq!(worded(text, 2), "| Rated power | 250 kW |");
+        assert_eq!(worded("| 12 | 3.5 kW |", 2), "");
     }
 }

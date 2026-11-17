@@ -18,6 +18,34 @@ pub struct Fact {
     pub path: String,
 }
 
+const FACTS: &str = "with facts as (select 'mention' as kind, m.id, e.class_iri, \
+    null::text as property_iri, m.method, m.confidence, e.name as subject, null::text as object, \
+    coalesce(k.text, d0.path) as text, m.span_start, m.span_end, \
+    coalesce(k.content_id, d0.content_id) as content_id, k.page_from \
+    from mentions m join entities e on e.id = m.entity_id \
+    left join chunks k on k.id = m.chunk_id left join documents d0 on d0.id = m.document_id \
+    union all \
+    select 'relation', r.id, s.class_iri, r.property_iri, r.method, r.confidence, s.name, \
+    t.name, coalesce(k.text, d0.path), r.span_start, r.span_end, \
+    coalesce(k.content_id, d0.content_id), k.page_from \
+    from relations r join entities s on s.id = r.src_id join entities t on t.id = r.dst_id \
+    left join chunks k on k.id = r.chunk_id left join documents d0 on d0.id = r.document_id \
+    where r.property_iri not in ('http://www.w3.org/2002/07/owl#sameAs', \
+    'http://purl.org/dc/terms/references', 'http://purl.org/dc/terms/replaces', \
+    'http://purl.org/dc/terms/isReferencedBy') \
+    union all \
+    select 'attribute', a.id, e.class_iri, a.property_iri, a.method, a.confidence, e.name, \
+    concat_ws(' ', case when a.low is null and a.high is null then a.value_text \
+    when a.low = a.high then a.low::text \
+    else concat(coalesce(a.low::text, ''), '..', coalesce(a.high::text, '')) end, \
+    a.unit_text), k.text, a.span_start, a.span_end, k.content_id, k.page_from \
+    from attributes a join entities e on e.id = a.entity_id join chunks k on k.id = a.chunk_id) \
+    select f.kind, f.id, f.class_iri, f.property_iri, f.method, f.confidence, f.subject, \
+    f.object, f.text, f.span_start, f.span_end, f.page_from, d.path from facts f \
+    join lateral (select path from documents d where d.content_id = f.content_id \
+    and d.status = 'present' order by d.id limit 1) d on true \
+    where f.method like $1 || '%' ";
+
 pub async fn sample(
     pool: &PgPool,
     method_prefix: &str,
@@ -25,34 +53,11 @@ pub async fn sample(
     seed: &str,
     limit: i64,
 ) -> Result<Vec<Fact>> {
-    let rows = sqlx::query_as(
-        "with facts as (select 'mention' as kind, m.id, e.class_iri, null::text as property_iri, \
-         m.method, m.confidence, e.name as subject, null::text as object, \
-         coalesce(k.text, d0.path) as text, m.span_start, m.span_end, \
-         coalesce(k.content_id, d0.content_id) as content_id, k.page_from \
-         from mentions m join entities e on e.id = m.entity_id \
-         left join chunks k on k.id = m.chunk_id left join documents d0 on d0.id = m.document_id \
-         union all \
-         select 'relation', r.id, s.class_iri, r.property_iri, r.method, r.confidence, s.name, \
-         t.name, coalesce(k.text, d0.path), r.span_start, r.span_end, \
-         coalesce(k.content_id, d0.content_id), k.page_from \
-         from relations r join entities s on s.id = r.src_id join entities t on t.id = r.dst_id \
-         left join chunks k on k.id = r.chunk_id left join documents d0 on d0.id = r.document_id \
-         union all \
-         select 'attribute', a.id, e.class_iri, a.property_iri, a.method, a.confidence, e.name, \
-         concat_ws(' ', case when a.low is null and a.high is null then a.value_text \
-         when a.low = a.high then a.low::text \
-         else concat(coalesce(a.low::text, ''), '..', coalesce(a.high::text, '')) end, \
-         a.unit_text), k.text, a.span_start, a.span_end, k.content_id, k.page_from \
-         from attributes a join entities e on e.id = a.entity_id join chunks k on k.id = a.chunk_id) \
-         select f.kind, f.id, f.class_iri, f.property_iri, f.method, f.confidence, f.subject, \
-         f.object, f.text, f.span_start, f.span_end, f.page_from, d.path from facts f \
-         join lateral (select path from documents d where d.content_id = f.content_id \
-         and d.status = 'present' order by d.id limit 1) d on true \
-         where f.method like $1 || '%' and ($2 = '' or f.class_iri = $2 or f.property_iri = $2) \
+    let rows = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "{FACTS}and ($2 = '' or f.class_iri = $2 or f.property_iri = $2) \
          and not exists (select 1 from fact_reviews v where v.kind = f.kind and v.fact_id = f.id) \
-         order by md5($3 || f.kind || f.id::text) limit $4",
-    )
+         order by md5($3 || f.kind || f.id::text) limit $4"
+    )))
     .bind(method_prefix)
     .bind(iri)
     .bind(seed)
@@ -60,6 +65,80 @@ pub async fn sample(
     .fetch_all(pool)
     .await?;
     Ok(rows)
+}
+
+pub async fn judge_sample(
+    pool: &PgPool,
+    method_prefix: &str,
+    kind: &str,
+    seed: &str,
+    limit: i64,
+) -> Result<Vec<Fact>> {
+    let rows = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "{FACTS}and f.kind = $2 and not exists (select 1 from fact_reviews v \
+         where v.kind = f.kind and v.fact_id = f.id and v.reviewer = 'judge') \
+         order by exists (select 1 from fact_reviews v where v.kind = f.kind \
+         and v.fact_id = f.id and v.reviewer = 'human') desc, md5($3 || f.kind || f.id::text) \
+         limit $4"
+    )))
+    .bind(method_prefix)
+    .bind(kind)
+    .bind(seed)
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
+pub async fn record_judged(pool: &PgPool, verdicts: &[(&Fact, bool, String, bool)]) -> Result<()> {
+    let mut tx = pool.begin().await?;
+    for (fact, right, snapshot, planted) in verdicts {
+        sqlx::query(
+            "insert into fact_reviews (kind, fact_id, class_iri, property_iri, method, verdict, \
+             snapshot, reviewer, planted) values ($1, $2, $3, $4, $5, $6, $7, 'judge', $8)",
+        )
+        .bind(&fact.kind)
+        .bind(fact.id)
+        .bind(&fact.class_iri)
+        .bind(&fact.property_iri)
+        .bind(&fact.method)
+        .bind(if *right { "right" } else { "wrong" })
+        .bind(snapshot)
+        .bind(planted)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, FromRow)]
+pub struct Judged {
+    pub kind: String,
+    pub planted: bool,
+    pub right: i64,
+    pub total: i64,
+}
+
+pub async fn judged(pool: &PgPool) -> Result<Vec<Judged>> {
+    let rows = sqlx::query_as(
+        "select kind, planted, count(*) filter (where verdict = 'right') as right, \
+         count(*) as total from fact_reviews where reviewer = 'judge' group by 1, 2 order by 1, 2",
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
+pub async fn human_agreement(pool: &PgPool) -> Result<(i64, i64)> {
+    let row = sqlx::query_as(
+        "select count(*), count(*) filter (where h.verdict = j.verdict) \
+         from fact_reviews h join fact_reviews j on j.kind = h.kind and j.fact_id = h.fact_id \
+         and j.reviewer = 'judge' and not j.planted where h.reviewer = 'human'",
+    )
+    .fetch_one(pool)
+    .await?;
+    Ok(row)
 }
 
 pub async fn record(pool: &PgPool, fact: &Fact, verdict: &str, snapshot: &str) -> Result<()> {
@@ -91,7 +170,7 @@ pub async fn precision(pool: &PgPool) -> Result<Vec<Precision>> {
     let rows = sqlx::query_as(
         "select coalesce(property_iri, class_iri) as iri, method, \
          count(*) filter (where verdict = 'right') as right, count(*) as total \
-         from fact_reviews group by 1, 2 order by 2, 1",
+         from fact_reviews where not planted group by 1, 2 order by 2, 1",
     )
     .fetch_all(pool)
     .await?;
@@ -210,4 +289,65 @@ pub async fn proposed_classes(
     .fetch_all(pool)
     .await?;
     Ok(rows)
+}
+
+#[derive(Debug, Clone, FromRow)]
+pub struct KindPrecision {
+    pub kind: String,
+    pub method: String,
+    pub right: i64,
+    pub total: i64,
+}
+
+pub async fn kind_precision(pool: &PgPool) -> Result<Vec<KindPrecision>> {
+    let rows = sqlx::query_as(
+        "select kind, method, count(*) filter (where verdict = 'right') as right, \
+         count(*) as total from fact_reviews where not planted group by 1, 2 order by 1, 2",
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
+pub struct Rescore {
+    pub kind: &'static str,
+    pub methods: Vec<String>,
+    pub base: Vec<f64>,
+    pub iri_methods: Vec<String>,
+    pub iris: Vec<String>,
+    pub iri_base: Vec<f64>,
+}
+
+pub async fn rescore(pool: &PgPool, scores: &Rescore) -> Result<u64> {
+    let (table, column) = match scores.kind {
+        "mention" => ("entities", "class_iri"),
+        "relation" => ("relations", "property_iri"),
+        _ => ("attributes", "property_iri"),
+    };
+    let done = sqlx::query(sqlx::AssertSqlSafe(format!(
+        "update {table} x set confidence = coalesce((select i.p from \
+         unnest($3::text[], $4::text[], $5::float8[]) i(method, iri, p) \
+         where i.method = x.method and i.iri = x.{column}), k.p) \
+         from unnest($1::text[], $2::float8[]) k(method, p) where k.method = x.method"
+    )))
+    .bind(&scores.methods)
+    .bind(&scores.base)
+    .bind(&scores.iri_methods)
+    .bind(&scores.iris)
+    .bind(&scores.iri_base)
+    .execute(pool)
+    .await?;
+    Ok(done.rows_affected())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn links_made_by_resolve_are_not_reviewed_as_relations() {
+        for iri in crate::db::resolve::BUILT_IN {
+            assert!(FACTS.contains(&format!("'{iri}'")), "{iri}");
+        }
+    }
 }

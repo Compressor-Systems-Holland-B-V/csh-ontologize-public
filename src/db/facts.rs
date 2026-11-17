@@ -311,6 +311,19 @@ pub async fn write(
                 );
             }
         }
+        for (start, end) in &chunk.checked.doc_mentions {
+            for id in docs.get(&chunk.chunk_id).into_iter().flatten() {
+                mention_row(
+                    &mut mentions,
+                    *id,
+                    &owner,
+                    *start,
+                    *end,
+                    method,
+                    confidence.base * chunk.scale,
+                );
+            }
+        }
         let resolve = |end: Endpoint| -> Vec<i64> {
             match end {
                 Endpoint::Doc => docs.get(&chunk.chunk_id).cloned().unwrap_or_default(),
@@ -465,6 +478,19 @@ pub async fn property_counts(pool: &PgPool) -> Result<Vec<(String, i64, i64)>> {
          where method like $1 group by 1 order by 2 desc, 1",
     )
     .bind(MODEL_METHODS)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
+pub async fn line_files(pool: &PgPool) -> Result<Vec<(String, i64)>> {
+    let rows = sqlx::query_as(
+        "select line, count(*) from (select distinct k.content_id, \
+         btrim(t, E' \\t\\r') as line from chunks k, regexp_split_to_table(k.text, E'\\n') t \
+         where exists (select 1 from documents d where d.content_id = k.content_id \
+         and d.status = 'present')) l where line ~ '[[:alpha:]]' group by line \
+         having count(*) > 1",
+    )
     .fetch_all(pool)
     .await?;
     Ok(rows)

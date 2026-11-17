@@ -13,7 +13,9 @@ use crate::config::Config;
 use crate::db;
 use crate::db::facts::Confidence;
 use crate::db::llm::{JobParams, Owner};
-use crate::facts::sample::{Candidate, Settings, first_folder, letter_share, select, text_hash};
+use crate::facts::sample::{
+    Candidate, Noise, Settings, first_folder, letter_share, noise, select, text_hash,
+};
 
 const KEY_BATCH: usize = 10_000;
 
@@ -58,6 +60,23 @@ struct Todo {
     order: (usize, i64, i64),
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+pub struct Skipped {
+    pub junk: usize,
+    pub repeats: usize,
+    pub old: usize,
+}
+
+impl Skipped {
+    pub fn line(&self) -> String {
+        format!(
+            "Left out before the model: {} unreadable or mostly numbers, {} repeated texts, \
+             {} old copies.",
+            self.junk, self.repeats, self.old
+        )
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct Plan {
     pub scanned: usize,
@@ -65,6 +84,7 @@ pub(crate) struct Plan {
     pub done: usize,
     todo: Vec<Todo>,
     pub stale: Vec<i64>,
+    pub skipped: Skipped,
 }
 
 pub(crate) struct Counts {
@@ -87,6 +107,7 @@ pub(crate) trait Stage {
     const SAMPLED: &'static str;
     const WRITES: &'static str;
     const OWNER: Owner = Owner::Chunk;
+    const FILTERED: bool = true;
 
     fn base(&self) -> &Base<'_>;
     fn keys(item: &Self::Item) -> Keys<'_>;
@@ -110,7 +131,7 @@ pub(crate) trait Stage {
     fn summary(&self, plan: &Plan, counts: &Counts, started: Instant);
     async fn clear(&self, stale: &[i64], dry_run: bool) -> Result<()>;
     async fn tidy(&self) -> Result<()>;
-    async fn report(&self, job: Option<i64>) -> Result<()>;
+    async fn report(&self, job: Option<i64>, skipped: &Skipped) -> Result<()>;
 }
 
 fn path_filter(patterns: &[String]) -> Result<Option<GlobSet>> {
@@ -178,6 +199,11 @@ async fn plan<S: Stage>(stage: &S, sample: Option<usize>, seed: &str) -> Result<
         base.sources.iter().collect()
     };
     let paths = path_filter(base.paths)?;
+    let old = match S::FILTERED {
+        true => path_filter(&extract.skip_paths)?,
+        false => None,
+    };
+    let mut seen: HashSet<u64> = HashSet::new();
     let mut plan = Plan::default();
     let mut candidates = Vec::new();
     let mut rows: HashMap<i64, Row> = HashMap::new();
@@ -189,6 +215,10 @@ async fn plan<S: Stage>(stage: &S, sample: Option<usize>, seed: &str) -> Result<
         after = last;
         let mut batch = Vec::new();
         for chunk in chunks {
+            if old.as_ref().is_some_and(|set| set.is_match(&chunk.path)) {
+                plan.skipped.old += 1;
+                continue;
+            }
             let source = source_order
                 .iter()
                 .position(|s| **s == chunk.source)
@@ -201,8 +231,21 @@ async fn plan<S: Stage>(stage: &S, sample: Option<usize>, seed: &str) -> Result<
             if sample.is_some() {
                 candidates.push(candidate(&chunk));
                 rows.insert(chunk.id, row);
-            } else {
-                batch.push(row);
+                continue;
+            }
+            let found = match S::FILTERED {
+                true => noise(
+                    &candidate(&chunk),
+                    extract.min_letter_share,
+                    extract.min_ocr_confidence,
+                    &mut seen,
+                ),
+                false => None,
+            };
+            match found {
+                Some(Noise::Junk) => plan.skipped.junk += 1,
+                Some(Noise::Repeat) => plan.skipped.repeats += 1,
+                None => batch.push(row),
             }
         }
         compare(stage, &batch, &mut plan).await?;
@@ -217,6 +260,8 @@ async fn plan<S: Stage>(stage: &S, sample: Option<usize>, seed: &str) -> Result<
             min_ocr_confidence: extract.min_ocr_confidence,
         };
         let selected = select(&candidates, &settings);
+        plan.skipped.junk += selected.junk;
+        plan.skipped.repeats += selected.duplicates;
         println!(
             "{}: sample of {} from {} {} ({} repeated texts and {} unreadable or mostly numbers \
              left out)",
@@ -237,6 +282,9 @@ async fn plan<S: Stage>(stage: &S, sample: Option<usize>, seed: &str) -> Result<
         for part in picked.chunks(base.read_batch) {
             compare(stage, part, &mut plan).await?;
         }
+    }
+    if S::FILTERED && sample.is_none() {
+        println!("{}: {}", base.task, plan.skipped.line());
     }
     plan.todo.sort_by_key(|t| t.order);
     Ok(plan)
@@ -363,7 +411,7 @@ pub(crate) async fn run<S: Stage>(stage: &S, options: &Options) -> Result<Outcom
             db::llm::set_job(pool, open.id, "finished", None, None).await?;
         }
         stage.tidy().await?;
-        stage.report(None).await?;
+        stage.report(None, &plan.skipped).await?;
         println!("{task}: nothing to send");
         return Ok(Outcome::Finished);
     }
@@ -418,6 +466,7 @@ pub(crate) async fn run<S: Stage>(stage: &S, options: &Options) -> Result<Outcom
         method,
         confidence,
         chunk_of,
+        skipped: plan.skipped,
         pending: Mutex::new(HashMap::new()),
     };
     let runner = Runner {
@@ -441,6 +490,7 @@ struct Model<'a, S: Stage> {
     method: String,
     confidence: Confidence,
     chunk_of: HashMap<i32, i64>,
+    skipped: Skipped,
     pending: Mutex<HashMap<i32, S::Item>>,
 }
 
@@ -499,6 +549,6 @@ impl<S: Stage> Handler for Model<'_, S> {
         if let Ok(mut pending) = self.pending.lock() {
             pending.clear();
         }
-        self.stage.report(Some(self.job)).await
+        self.stage.report(Some(self.job), &self.skipped).await
     }
 }

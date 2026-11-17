@@ -17,6 +17,8 @@ use crate::db::llm::{Call, Job, JobParams};
 
 pub const GONE: &str = "the item no longer exists";
 const MAX_PAUSES_PER_ITEM: u32 = 3;
+const USAGE_EVERY: Duration = Duration::from_secs(300);
+const UNREAD: &str = "cannot read the usage window";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Outcome {
@@ -112,6 +114,62 @@ struct Account {
     provider: Arc<Provider>,
     in_flight: usize,
     paused: Option<Paused>,
+    cap: f64,
+    read_at: Option<Instant>,
+    windows: Windows,
+}
+
+async fn read_usage(accounts: &mut [Account]) {
+    for account in accounts {
+        if account.read_at.is_some_and(|at| at.elapsed() < USAGE_EVERY) {
+            continue;
+        }
+        let Some(read) = account.provider.windows().await else {
+            continue;
+        };
+        account.read_at = Some(Instant::now());
+        apply_reading(account, read, Utc::now());
+    }
+}
+
+fn apply_reading(account: &mut Account, read: Result<Windows, String>, now: DateTime<Utc>) {
+    let unread = account
+        .paused
+        .as_ref()
+        .is_some_and(|p| p.reason.starts_with(UNREAD));
+    match read {
+        Ok(windows) => {
+            account.windows = windows;
+            if unread {
+                account.paused = None;
+            }
+            if account.paused.is_none()
+                && let Some(at) = budget::window_full(&windows, account.cap, now)
+            {
+                account.paused = Some(Paused {
+                    since: now,
+                    resume: Resume::At(at),
+                    reason: format!(
+                        "a Claude Code usage window reached {}",
+                        percent(account.cap)
+                    ),
+                });
+            }
+        }
+        Err(error)
+            if account.cap < 1.0
+                && (account.paused.is_none() || unread)
+                && account.windows.five_hour.is_none_or(|w| w.resets_at <= now) =>
+        {
+            let wait = USAGE_EVERY;
+            account.paused = Some(Paused {
+                since: now,
+                resume: Resume::At(now + wait),
+                reason: format!("{UNREAD}: {error}"),
+            });
+        }
+        Err(_) => {}
+    }
 }
 
 fn pick(accounts: &[Account], concurrency: usize) -> Option<usize> {
@@ -248,6 +306,9 @@ pub(crate) async fn run<H: Handler>(
             provider: Arc::new(provider),
             in_flight: 0,
             paused: None,
+            cap: config.providers.claude_code.window_use(dir),
+            read_at: None,
+            windows: Windows::default(),
         });
     }
     let provider = accounts[0].provider.clone();
@@ -307,11 +368,7 @@ pub(crate) async fn run<H: Handler>(
                 for account in &mut accounts {
                     if let Some(windows) =
                         db::llm::last_windows(pool, account.dir.as_deref()).await?
-                        && let Some(at) = budget::window_full(
-                            &windows,
-                            config.providers.claude_code.max_window_use,
-                            now,
-                        )
+                        && let Some(at) = budget::window_full(&windows, account.cap, now)
                     {
                         account.paused = Some(Paused {
                             since: now,
@@ -444,8 +501,8 @@ async fn print_estimate(
         }
     );
     if name.provider.has_windows() {
-        let max_use = runner.config.providers.claude_code.max_window_use;
         for account in accounts {
+            let max_use = account.cap;
             let dir = account.dir.as_deref();
             let prefix = dir.map_or(String::new(), |dir| format!("{dir} "));
             match db::llm::last_windows(runner.pool, dir).await? {
@@ -522,12 +579,14 @@ async fn send_all<H: Handler>(
     let mut stop: Option<Stop> = None;
     let mut last_progress = Instant::now();
     let (mut ok, mut invalid, mut failed) = (0usize, 0usize, 0usize);
-    let max_use = runner.config.providers.claude_code.max_window_use;
     let mut subscription = runner.name.provider.has_windows();
     let margin = Duration::from_secs(runner.config.llm.wait_margin_secs);
     let label = handler.label();
     loop {
         lift_reset(accounts, Utc::now(), margin);
+        if subscription {
+            read_usage(accounts).await;
+        }
         while stop.is_none() && !queue.is_empty() {
             let Some(account) = pick(accounts, sender.concurrency) else {
                 break;
@@ -618,7 +677,12 @@ async fn send_all<H: Handler>(
             Ok(reply) => {
                 call.usage = reply.usage;
                 call.subscription = reply.subscription;
-                call.windows = reply.windows;
+                let windows = if reply.windows == Windows::default() {
+                    accounts[account].windows
+                } else {
+                    reply.windows
+                };
+                call.windows = windows;
                 subscription = reply.subscription;
                 if !reply.subscription {
                     spent += reply.usage.cost_usd;
@@ -638,8 +702,9 @@ async fn send_all<H: Handler>(
                         db::llm::record(pool, &call, None, Some((ord, "invalid"))).await?;
                     }
                 }
+                let max_use = accounts[account].cap;
                 if reply.subscription
-                    && let Some(at) = budget::window_full(&reply.windows, max_use, Utc::now())
+                    && let Some(at) = budget::window_full(&windows, max_use, Utc::now())
                 {
                     paused = Some((
                         Resume::At(at),
@@ -854,7 +919,47 @@ mod tests {
                 resume: Resume::At(DateTime::from_timestamp(at, 0).unwrap()),
                 reason: format!("limit {at}"),
             }),
+            cap: 1.0,
+            read_at: None,
+            windows: Windows::default(),
         }
+    }
+
+    #[test]
+    fn each_account_stops_at_its_own_cap_and_when_unread() {
+        let now = DateTime::from_timestamp(1_000, 0).unwrap();
+        let reset = DateTime::from_timestamp(9_000, 0).unwrap();
+        let at = |used: f64| Windows {
+            five_hour: Some(super::super::Window {
+                used,
+                resets_at: reset,
+            }),
+            seven_day: None,
+        };
+        let mut a = account(0, None);
+        let mut b = account(0, None);
+        b.cap = 0.95;
+        apply_reading(&mut a, Ok(at(0.96)), now);
+        apply_reading(&mut b, Ok(at(0.96)), now);
+        assert!(a.paused.is_none());
+        assert_eq!(b.paused.as_ref().unwrap().resume, Resume::At(reset));
+        let mut b = account(0, None);
+        b.cap = 0.95;
+        apply_reading(&mut b, Ok(at(0.5)), now);
+        assert!(b.paused.is_none());
+        apply_reading(&mut a, Err("offline".to_string()), now);
+        assert!(a.paused.is_none());
+        apply_reading(&mut b, Err("offline".to_string()), now);
+        assert!(
+            b.paused.is_none(),
+            "a reading in the current window is kept"
+        );
+        b.windows = Windows::default();
+        apply_reading(&mut b, Err("offline".to_string()), now);
+        assert!(b.paused.as_ref().unwrap().reason.starts_with(UNREAD));
+        apply_reading(&mut b, Ok(at(0.5)), now);
+        assert!(b.paused.is_none());
+        assert_eq!(b.windows, at(0.5));
     }
 
     #[test]

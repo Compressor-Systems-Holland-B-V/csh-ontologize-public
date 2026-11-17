@@ -127,3 +127,9 @@ on = "both"
 [[revisions]]
 pattern = '(?P<series>DWG-\d{3}-[A-Z]\d) rev (?P<rev>[A-Z0-9]+)\.'
 order = "natural"
+
+# [[number_keys]]
+# class = "acme:Project"
+# pattern = '(?i)^SP-?(?P<n>\d{4}-\d{4})(?:\s|$)'
+# key = "SP-{n}"
+# link = { property = "acme:sparesOf", key = "P-{n}" }

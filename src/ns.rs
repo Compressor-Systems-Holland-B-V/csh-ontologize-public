@@ -19,6 +19,7 @@ pub const SKOS_ALT_LABEL: &str = "http://www.w3.org/2004/02/skos/core#altLabel";
 pub const XSD_DOUBLE: &str = "http://www.w3.org/2001/XMLSchema#double";
 pub const DCTERMS_REFERENCES: &str = "http://purl.org/dc/terms/references";
 pub const DCTERMS_REPLACES: &str = "http://purl.org/dc/terms/replaces";
+pub const DCTERMS_IS_REFERENCED_BY: &str = "http://purl.org/dc/terms/isReferencedBy";
 
 pub const STANDARD_PREFIXES: [(&str, &str); 4] =
     [("rdf", RDF), ("rdfs", RDFS), ("owl", OWL), ("skos", SKOS)];
@@ -47,6 +48,7 @@ mod tests {
             (XSD_DOUBLE, XSD, "double"),
             (DCTERMS_REFERENCES, DCTERMS, "references"),
             (DCTERMS_REPLACES, DCTERMS, "replaces"),
+            (DCTERMS_IS_REFERENCED_BY, DCTERMS, "isReferencedBy"),
         ] {
             assert_eq!(full, format!("{base}{local}"));
         }

@@ -1,3 +1,4 @@
+pub mod batch;
 pub mod budget;
 pub mod claude_code;
 pub mod job;
@@ -327,6 +328,13 @@ impl Provider {
             Provider::ClaudeCode(provider) => provider.send(request).await,
             Provider::OpenRouter(provider) => provider.send(request).await,
             Provider::Ollama(provider) => provider.send(request).await,
+        }
+    }
+
+    pub async fn windows(&self) -> Option<Result<Windows, String>> {
+        match self {
+            Provider::ClaudeCode(provider) => provider.windows().await,
+            _ => None,
         }
     }
 

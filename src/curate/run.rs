@@ -1,8 +1,8 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use anyhow::{Result, bail};
+use anyhow::{Context as _, Result, bail};
 use globset::GlobSet;
 use sqlx::PgPool;
 
@@ -18,7 +18,7 @@ use crate::db::llm::Owner;
 use crate::db::resolve::{NewLink, SAME_AS};
 use crate::llm::ModelName;
 use crate::llm::prompt::{self, Prompt};
-use crate::llm::stage::{self, Base, Chunk, Counts, Keys, Plan, Stage};
+use crate::llm::stage::{self, Base, Chunk, Counts, Keys, Plan, Skipped, Stage};
 use crate::ontology::{self, Ontology};
 
 pub use crate::llm::job::{Options, Outcome};
@@ -120,6 +120,9 @@ async fn curate(
         out: PathBuf::from(&curate.out),
     };
     let outcome = stage::run(&setup, options).await?;
+    if !options.dry_run && !curate.gazetteer.is_empty() {
+        write_gazetteer(pool, config, &setup.ontology).await?;
+    }
     if !options.dry_run {
         let mut stats = crate::resolve::Stats::default();
         crate::resolve::canonical(pool, &mut stats).await?;
@@ -162,6 +165,20 @@ async fn clusters(
     ));
     hits.extend(super::name_hits(ontology, patterns, &roots));
     let components = super::join(components, hits);
+    let folder_classes: Vec<String> = config
+        .curate
+        .folder_classes
+        .iter()
+        .map(|c| ontology.class(c).map(|c| c.iri.clone()))
+        .collect::<Result<_, _>>()
+        .map_err(|e| anyhow::anyhow!("curate.folder_classes: {e}"))?;
+    let pairs = if folder_classes.is_empty() {
+        Vec::new()
+    } else {
+        db::curate::folder_pairs(pool, &folder_classes).await?
+    };
+    let fixed: HashSet<i64> = pairs.iter().map(|(_, project, _)| *project).collect();
+    let components = super::with_folders(components, &pairs);
     let sources = super::sources(&components);
     let ids: Vec<i64> = components
         .iter()
@@ -201,6 +218,7 @@ async fn clusters(
                 mentions: row.mentions,
                 snippets: snippets.remove(&row.id).unwrap_or_default(),
                 relations: relations.remove(&row.id).unwrap_or_default(),
+                fixed: fixed.contains(&row.id),
             };
             (row.id, member)
         })
@@ -227,6 +245,39 @@ async fn clusters(
         out.insert(cluster.id, cluster);
     }
     Ok((out, skipped, sources))
+}
+
+async fn write_gazetteer(pool: &PgPool, config: &Config, ontology: &Ontology) -> Result<()> {
+    let curate = &config.curate;
+    let classes: Vec<String> = curate
+        .gazetteer_classes
+        .iter()
+        .map(|c| ontology.class(c).map(|c| c.iri.clone()))
+        .collect::<Result<_, _>>()
+        .map_err(|e| anyhow::anyhow!("curate.gazetteer_classes: {e}"))?;
+    let found: Vec<super::GazetteerRow> =
+        db::curate::known(pool, &classes, curate.gazetteer_documents)
+            .await?
+            .into_iter()
+            .map(|row| super::GazetteerRow {
+                class: crate::facts::report::compact(ontology, &row.class_iri),
+                key: row.key,
+                aliases: row.names.join("|"),
+                name: row.name,
+                lang: String::new(),
+            })
+            .collect();
+    let path = PathBuf::from(&curate.gazetteer);
+    let previous = std::fs::read_to_string(&path).unwrap_or_default();
+    let count = found.len();
+    let text = super::gazetteer(&previous, found)
+        .map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).with_context(|| format!("cannot create {}", dir.display()))?;
+    }
+    std::fs::write(&path, text).with_context(|| format!("cannot write {}", path.display()))?;
+    println!("curate: {count} known things in {}", path.display());
+    Ok(())
 }
 
 fn link(
@@ -262,6 +313,7 @@ impl Stage for Setup<'_> {
     type Checked = Checked;
     const SAMPLED: &'static str = "clusters";
     const WRITES: &'static str = "decisions";
+    const FILTERED: bool = false;
     const OWNER: Owner = Owner::Entity;
 
     fn base(&self) -> &Base<'_> {
@@ -392,7 +444,7 @@ impl Stage for Setup<'_> {
         Ok(())
     }
 
-    async fn report(&self, job: Option<i64>) -> Result<()> {
+    async fn report(&self, job: Option<i64>, _skipped: &Skipped) -> Result<()> {
         super::report::write_report(
             self.base.pool,
             self.base.config,

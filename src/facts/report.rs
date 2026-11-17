@@ -12,6 +12,7 @@ use crate::config::Config;
 use crate::db;
 use crate::db::facts::TermRow;
 use crate::fit::report::{label, slug};
+use crate::llm::stage::Skipped;
 use crate::ns::local_name;
 use crate::ns::{
     OWL_OBJECT_PROPERTY, RDF_TYPE, RDFS_COMMENT, RDFS_DOMAIN, RDFS_RANGE, SKOS_PREF_LABEL,
@@ -167,7 +168,7 @@ pub fn turtle(
     Ok(text)
 }
 
-fn compact(ontology: &Ontology, iri: &str) -> String {
+pub(crate) fn compact(ontology: &Ontology, iri: &str) -> String {
     for (prefix, namespace) in &ontology.prefixes {
         if let Some(local) = iri.strip_prefix(namespace.as_str())
             && !local.is_empty()
@@ -292,9 +293,12 @@ pub fn markdown(
     out
 }
 
-async fn header(pool: &PgPool, job: Option<i64>) -> Result<String> {
+async fn header(pool: &PgPool, job: Option<i64>, skipped: &Skipped) -> Result<String> {
     let extracted = db::facts::extracted_chunks(pool).await?;
-    let mut header = format!("Chunks extracted by a model: {extracted}.\n");
+    let mut header = format!(
+        "Chunks extracted by a model: {extracted}.\n{}\n",
+        skipped.line()
+    );
     let Some(job) = job.filter(|id| *id > 0) else {
         return Ok(header);
     };
@@ -333,11 +337,12 @@ pub async fn write_report(
     config: &Config,
     out: &Path,
     job: Option<i64>,
+    skipped: &Skipped,
 ) -> Result<()> {
     let model = crate::llm::ModelName::parse(&config.models.extract)
         .map_err(|e| anyhow::anyhow!("models.extract: {e}"))?;
     let totals = Totals {
-        header: header(pool, job).await?,
+        header: header(pool, job, skipped).await?,
         classes: db::facts::class_counts(pool).await?,
         names: db::facts::top_names(pool, NAMES_PER_CLASS).await?,
         properties: db::facts::property_counts(pool).await?,

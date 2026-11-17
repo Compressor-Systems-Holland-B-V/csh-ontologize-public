@@ -14,6 +14,9 @@ use super::{CallError, Reply, Request, Resume, Usage, Window, Windows};
 pub const BIN_VARIABLE: &str = "CLAUDE_CODE_BIN";
 pub const DEFAULT_BIN: &str = "claude";
 const CONFIG_DIR_VARIABLE: &str = "CLAUDE_CONFIG_DIR";
+const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
+const USAGE_BETA: &str = "oauth-2025-04-20";
+const CREDENTIALS_FILE: &str = ".credentials.json";
 const SUBSCRIPTION_KEY_SOURCE: &str = "none";
 const ALLOWED: [&str; 2] = ["allowed", "allowed_warning"];
 const STDERR_TAIL: usize = 500;
@@ -115,6 +118,17 @@ impl ClaudeCode {
         .collect()
     }
 
+    pub async fn windows(&self) -> Option<Result<Windows, String>> {
+        let dir = self.config_dir.as_ref()?;
+        let text = std::fs::read_to_string(dir.join(CREDENTIALS_FILE)).ok()?;
+        // An expired token only gets refreshed by a claude call; reading now would fail and pause
+        // the account for good, so skip the reading until a call has refreshed it.
+        if token_expired(&text, Utc::now()) {
+            return None;
+        }
+        Some(read_windows(dir, self.timeout).await)
+    }
+
     pub async fn send(&self, request: &Request) -> Result<Reply, CallError> {
         let schema = request.schema.to_string().len();
         if schema > MAX_ARG_BYTES {
@@ -184,6 +198,89 @@ impl ClaudeCode {
             status: status.ok(),
         })
     }
+}
+
+async fn read_windows(dir: &Path, timeout: Duration) -> Result<Windows, String> {
+    let file = dir.join(CREDENTIALS_FILE);
+    let text = std::fs::read_to_string(&file)
+        .map_err(|error| format!("cannot read {}: {error}", file.display()))?;
+    let token =
+        access_token(&text).ok_or_else(|| format!("{} has no access token", file.display()))?;
+    let client = reqwest::Client::builder()
+        .timeout(timeout)
+        .build()
+        .map_err(|error| error.to_string())?;
+    let reply = client
+        .get(USAGE_URL)
+        .bearer_auth(token)
+        .header("anthropic-beta", USAGE_BETA)
+        .send()
+        .await
+        .map_err(|error| format!("usage of {}: {error}", dir.display()))?;
+    let status = reply.status();
+    let body = reply
+        .text()
+        .await
+        .map_err(|error| format!("usage of {}: {error}", dir.display()))?;
+    if !status.is_success() {
+        return Err(format!("usage of {}: HTTP {status}", dir.display()));
+    }
+    parse_usage(&body).ok_or_else(|| format!("usage of {}: unexpected reply", dir.display()))
+}
+
+#[derive(Deserialize)]
+struct Credentials {
+    #[serde(rename = "claudeAiOauth")]
+    oauth: Option<OauthToken>,
+}
+
+#[derive(Deserialize)]
+struct OauthToken {
+    #[serde(rename = "accessToken")]
+    access_token: String,
+    #[serde(rename = "expiresAt")]
+    expires_at: Option<i64>,
+}
+
+fn token_expired(text: &str, now: DateTime<Utc>) -> bool {
+    serde_json::from_str::<Credentials>(text)
+        .ok()
+        .and_then(|c| c.oauth?.expires_at)
+        .is_some_and(|ms| ms <= now.timestamp_millis())
+}
+
+fn access_token(text: &str) -> Option<String> {
+    serde_json::from_str::<Credentials>(text)
+        .ok()?
+        .oauth
+        .map(|o| o.access_token)
+}
+
+#[derive(Deserialize)]
+struct UsageReply {
+    five_hour: Option<UsageWindow>,
+    seven_day: Option<UsageWindow>,
+}
+
+#[derive(Deserialize)]
+struct UsageWindow {
+    utilization: f64,
+    resets_at: Option<DateTime<Utc>>,
+}
+
+fn parse_usage(body: &str) -> Option<Windows> {
+    let reply: UsageReply = serde_json::from_str(body).ok()?;
+    let window = |w: Option<UsageWindow>| {
+        let w = w?;
+        Some(Window {
+            used: w.utilization / 100.0,
+            resets_at: w.resets_at?,
+        })
+    };
+    Some(Windows {
+        five_hour: window(reply.five_hour),
+        seven_day: window(reply.seven_day),
+    })
 }
 
 async fn read_all<R: AsyncReadExt + Unpin>(reader: Option<R>) -> String {
@@ -311,6 +408,8 @@ struct RateLimitInfo {
     resets_at: Option<i64>,
     #[serde(rename = "unifiedWindows")]
     unified_windows: Option<UnifiedWindows>,
+    #[serde(rename = "isUsingOverage")]
+    is_using_overage: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -389,7 +488,7 @@ impl Parsed {
     fn into_reply(self) -> Result<Reply, CallError> {
         let windows = self.windows();
         if let Some(limit) = &self.limit
-            && !ALLOWED.contains(&limit.status.as_str())
+            && (!ALLOWED.contains(&limit.status.as_str()) || limit.is_using_overage == Some(true))
         {
             let resume = limit
                 .resets_at
@@ -398,7 +497,11 @@ impl Parsed {
                 .map_or(Resume::Funded, Resume::At);
             return Err(CallError::Pause {
                 resume,
-                reason: format!("Claude Code usage limit ({})", limit.status),
+                reason: if limit.is_using_overage == Some(true) {
+                    "Claude Code is using paid extra usage".to_string()
+                } else {
+                    format!("Claude Code usage limit ({})", limit.status)
+                },
             });
         }
         let subscription = self.key_source.as_deref() == Some(SUBSCRIPTION_KEY_SOURCE);
@@ -518,6 +621,41 @@ mod tests {
             parse(&rejected).into_reply(),
             Err(CallError::Pause { .. })
         ));
+    }
+
+    #[test]
+    fn overage_pauses_until_reset() {
+        let lines = "{\"type\":\"rate_limit_event\",\"rate_limit_info\":{\"status\":\"allowed\",\
+            \"resetsAt\":1893456000,\"rateLimitType\":\"five_hour\",\"overageStatus\":\"allowed\",\
+            \"isUsingOverage\":false}}\n\
+            {\"type\":\"result\",\"is_error\":false,\"structured_output\":{\"a\":1}}\n";
+        assert!(parse(lines).into_reply().is_ok());
+        let over = lines.replace("\"isUsingOverage\":false", "\"isUsingOverage\":true");
+        let error = parse(&over).into_reply().unwrap_err();
+        let CallError::Pause { resume, reason } = error else {
+            panic!("{error:?}");
+        };
+        assert_eq!(resume, Resume::At(time(1893456000).unwrap()));
+        assert!(reason.contains("extra usage"), "{reason}");
+    }
+
+    #[test]
+    fn usage_reply_and_credentials_parse() {
+        let windows = parse_usage(&read("usage.json")).unwrap();
+        let five = windows.five_hour.unwrap();
+        assert!((five.used - 0.17).abs() < 1e-9);
+        assert_eq!(five.resets_at.format("%Y-%m-%d").to_string(), "2030-01-01");
+        assert!((windows.seven_day.unwrap().used - 0.02).abs() < 1e-9);
+        assert!(parse_usage("{}").unwrap().five_hour.is_none());
+        assert!(parse_usage("not json").is_none());
+        let credentials = r#"{"claudeAiOauth":{"accessToken":"made-up-token","refreshToken":"r"}}"#;
+        assert_eq!(access_token(credentials).as_deref(), Some("made-up-token"));
+        assert!(access_token("{}").is_none());
+        let at = |ms: i64| format!(r#"{{"claudeAiOauth":{{"accessToken":"t","expiresAt":{ms}}}}}"#);
+        let now = Utc::now();
+        assert!(token_expired(&at(now.timestamp_millis() - 1), now));
+        assert!(!token_expired(&at(now.timestamp_millis() + 60_000), now));
+        assert!(!token_expired(credentials, now));
     }
 
     #[test]

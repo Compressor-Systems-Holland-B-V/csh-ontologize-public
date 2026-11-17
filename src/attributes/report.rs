@@ -11,6 +11,7 @@ use crate::config::Config;
 use crate::db;
 use crate::db::attributes::PropertyRow;
 use crate::llm::shortlist::pick;
+use crate::llm::stage::Skipped;
 use crate::ns::local_name;
 use crate::ontology::Ontology;
 
@@ -77,9 +78,12 @@ pub fn markdown(
     out
 }
 
-async fn header(pool: &PgPool, job: Option<i64>) -> Result<String> {
+async fn header(pool: &PgPool, job: Option<i64>, skipped: &Skipped) -> Result<String> {
     let sent = db::attributes::sent_chunks(pool).await?;
-    let mut header = format!("Chunks answered by the attributes model: {sent}.");
+    let mut header = format!(
+        "Chunks answered by the attributes model: {sent}. {}",
+        skipped.line()
+    );
     let Some(job) = job.filter(|id| *id > 0) else {
         return Ok(header);
     };
@@ -103,10 +107,11 @@ pub async fn write_report(
     config: &Config,
     out: &Path,
     job: Option<i64>,
+    skipped: &Skipped,
 ) -> Result<()> {
     let model = crate::llm::ModelName::parse(&config.models.attributes)
         .map_err(|e| anyhow::anyhow!("models.attributes: {e}"))?;
-    let header = header(pool, job).await?;
+    let header = header(pool, job, skipped).await?;
     let rows = db::attributes::property_counts(pool).await?;
     let drops = db::llm::task_stats(pool, TASK, model.provider.as_str(), &model.model).await?;
     std::fs::create_dir_all(out).with_context(|| format!("cannot create {}", out.display()))?;

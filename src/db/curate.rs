@@ -156,6 +156,76 @@ pub async fn members(pool: &PgPool, ids: &[i64]) -> Result<Vec<MemberRow>> {
     Ok(rows)
 }
 
+pub async fn folder_pairs(pool: &PgPool, classes: &[String]) -> Result<Vec<(i64, i64, String)>> {
+    let rows = sqlx::query_as(
+        "with model as (select r.id from entities r \
+         where (r.canonical_id is null or r.canonical_id = r.id) and r.class_iri = any($1) \
+         and not exists (select 1 from entities m where coalesce(m.canonical_id, m.id) = r.id \
+         and m.method not like 'llm:%')), \
+         docs as (select distinct mo.id as model_id, d.id as document_id from model mo \
+         join entities m on coalesce(m.canonical_id, m.id) = mo.id \
+         join mentions x on x.entity_id = m.id \
+         left join chunks k on k.id = x.chunk_id \
+         join documents d on d.status = 'present' and (d.id = x.document_id \
+         or (x.document_id is null and d.content_id = k.content_id))), \
+         counted as (select dc.model_id, coalesce(p.canonical_id, p.id) as project_id, \
+         count(*) as n from docs dc \
+         join entities de on de.document_id = dc.document_id and de.key = dc.document_id::text \
+         join relations rel on rel.src_id = de.id and rel.status <> 'rejected' \
+         join entities p on p.id = rel.dst_id and p.class_iri = any($1) \
+         and p.method not like 'llm:%' group by 1, 2) \
+         select distinct on (c.model_id) c.model_id, c.project_id, p.name from counted c \
+         join entities p on p.id = c.project_id \
+         where c.project_id <> c.model_id order by c.model_id, c.n desc, c.project_id",
+    )
+    .bind(classes)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
+#[derive(Debug, Clone, FromRow)]
+pub struct KnownRow {
+    pub class_iri: String,
+    pub key: String,
+    pub name: String,
+    pub names: Vec<String>,
+}
+
+pub async fn known(pool: &PgPool, classes: &[String], min_documents: i64) -> Result<Vec<KnownRow>> {
+    let rows = sqlx::query_as(
+        "with roots as (select r.id, coalesce((select o.class_iri from entity_classes o \
+         where o.entity_id = r.id and o.status in ('auto', 'confirmed') and o.class_iri is not null), \
+         r.class_iri) as class_iri from entities r \
+         where r.canonical_id is null or r.canonical_id = r.id), \
+         members as (select ro.id as root_id, ro.class_iri as root_class, m.id, m.key, m.name, m.method from roots ro \
+         join entities m on coalesce(m.canonical_id, m.id) = ro.id where ro.class_iri = any($1)), \
+         open as (select coalesce(e.canonical_id, e.id) as root_id from relations r \
+         join entities e on e.id in (r.src_id, r.dst_id) \
+         where r.property_iri = $3 and r.status = 'proposed' \
+         union select coalesce(e.canonical_id, e.id) from entity_classes x \
+         join entities e on e.id = x.entity_id where x.status = 'proposed'), \
+         documents as (select mb.root_id, count(distinct d.id) as n from members mb \
+         join mentions x on x.entity_id = mb.id left join chunks k on k.id = x.chunk_id \
+         join documents d on d.status = 'present' and (d.id = x.document_id \
+         or (x.document_id is null and d.content_id = k.content_id)) group by 1) \
+         select mb.root_class as class_iri, \
+         coalesce(min(mb.key) filter (where mb.method not like 'llm:%'), min(lower(mb.name))) as key, \
+         coalesce(min(mb.name) filter (where mb.method not like 'llm:%'), min(mb.name)) as name, \
+         array_agg(distinct mb.name order by mb.name) as names from members mb \
+         join documents dc on dc.root_id = mb.root_id and dc.n >= $2 \
+         where mb.root_id not in (select root_id from open) \
+         group by mb.root_id, mb.root_class \
+         having bool_or(mb.method like 'llm:%') order by 1, 2",
+    )
+    .bind(classes)
+    .bind(min_documents)
+    .bind(SAME_AS)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
 pub async fn snippets(pool: &PgPool, ids: &[i64], around: usize) -> Result<Vec<SnippetRow>> {
     let rows = sqlx::query_as(
         "select m.entity_id, substr(k.text, w.first + 1, m.span_end - w.first + $3) as text, \
@@ -306,6 +376,19 @@ pub async fn link_counts(pool: &PgPool) -> Result<Vec<(String, i64)>> {
     )
     .bind(SAME_AS)
     .bind(METHOD)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
+pub async fn open_counts(pool: &PgPool) -> Result<Vec<(String, i64)>> {
+    let rows = sqlx::query_as(
+        "select 'same as: ' || method, count(*) from relations \
+         where property_iri = $1 and status = 'proposed' group by method \
+         union all select 'class or name: ' || method, count(*) from entity_classes \
+         where status = 'proposed' group by method order by 1",
+    )
+    .bind(SAME_AS)
     .fetch_all(pool)
     .await?;
     Ok(rows)

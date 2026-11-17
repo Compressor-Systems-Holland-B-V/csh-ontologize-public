@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use super::{Answer, Built, DOC};
 use crate::ontology::Ontology;
 use crate::resolve::names::Normaliser;
-use crate::text::{fold, squash};
+use crate::text::{fold, squash, words};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Reason {
@@ -18,6 +18,9 @@ pub enum Reason {
     ClassName,
     RefTaken,
     DisjointClass,
+    QuoteWithoutName,
+    QuoteWithoutEnds,
+    BareTag,
 }
 
 impl Reason {
@@ -34,6 +37,9 @@ impl Reason {
             Reason::ClassName => "named after its class",
             Reason::RefTaken => "ref already used for a known thing",
             Reason::DisjointClass => "class disjoint with a known thing of the same name",
+            Reason::QuoteWithoutName => "quote does not hold the name",
+            Reason::QuoteWithoutEnds => "quote does not name both ends",
+            Reason::BareTag => "bare tag, kept as a mention of the document",
         }
     }
 }
@@ -84,6 +90,7 @@ pub struct Checked {
     pub entities: Vec<Entity>,
     pub relations: Vec<Relation>,
     pub others: Vec<Other>,
+    pub doc_mentions: Vec<(usize, usize)>,
     pub drops: BTreeMap<String, i64>,
 }
 
@@ -160,6 +167,49 @@ fn language<'a>(allowed: &'a [String], value: &str) -> Option<&'a String> {
         .find(|a| a.eq_ignore_ascii_case(value.trim()))
 }
 
+fn names(normaliser: &Normaliser, quote: &str, name: &str) -> bool {
+    let needle = Haystack::new(name).text;
+    if !needle.is_empty() && Haystack::new(quote).text.contains(&needle) {
+        return true;
+    }
+    let key = normaliser.key(name);
+    !key.is_empty() && format!(" {} ", normaliser.key(quote)).contains(&format!(" {key} "))
+}
+
+fn bare_tag(name: &str) -> bool {
+    let longest_letters = name
+        .split(|c: char| !c.is_alphabetic())
+        .map(|run| run.chars().count())
+        .max()
+        .unwrap_or(0);
+    name.chars().any(|c| c.is_ascii_digit()) && longest_letters < 3
+}
+
+fn line_of(text: &str, start: usize, end: usize) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let end = end.min(chars.len());
+    let first = chars[..start.min(end)]
+        .iter()
+        .rposition(|c| *c == '\n')
+        .map_or(0, |i| i + 1);
+    let last = chars[end..]
+        .iter()
+        .position(|c| *c == '\n')
+        .map_or(chars.len(), |i| end + i);
+    chars[first..last].iter().collect()
+}
+
+fn described(ontology: &Ontology, class: &str, line: &str, name: &str, min_words: usize) -> bool {
+    let folded = fold(line);
+    let labelled = ontology.classes.get(class).is_some_and(|c| {
+        c.labels
+            .values()
+            .chain(c.alt_labels.values().flatten())
+            .any(|l| !l.trim().is_empty() && folded.contains(&fold(l)))
+    });
+    labelled || words(line).saturating_sub(words(name)) >= min_words
+}
+
 pub fn entity_key(normaliser: &Normaliser, name: &str) -> String {
     match normaliser.key(name) {
         key if key.is_empty() => fold(name),
@@ -174,6 +224,7 @@ pub fn check(
     ontology: &Ontology,
     languages: &[String],
     normaliser: &Normaliser,
+    min_tag_words: usize,
 ) -> Checked {
     let haystack = Haystack::new(text);
     let mut checked = Checked::default();
@@ -218,6 +269,23 @@ pub fn check(
             checked.drop(Reason::QuoteNotFound, class);
             continue;
         };
+        if !names(normaliser, &entity.evidence, &entity.name) {
+            checked.drop(Reason::QuoteWithoutName, class);
+            continue;
+        }
+        if bare_tag(&entity.name)
+            && !described(
+                ontology,
+                class,
+                &line_of(text, start, end),
+                &entity.name,
+                min_tag_words,
+            )
+        {
+            checked.doc_mentions.push((start, end));
+            checked.drop(Reason::BareTag, class);
+            continue;
+        }
         let key = entity_key(normaliser, &entity.name);
         let index = *by_key
             .entry((class.clone(), key.clone()))
@@ -238,6 +306,13 @@ pub fn check(
             Endpoint::Doc => built.doc_class.clone().unwrap_or_default(),
             Endpoint::Known(i) => built.known[i].class.clone(),
             Endpoint::Entity(i) => checked.entities[i].class.clone(),
+        }
+    };
+    let name_of = |checked: &Checked, end: Endpoint| -> Option<String> {
+        match end {
+            Endpoint::Doc => None,
+            Endpoint::Known(i) => Some(built.known[i].name.clone()),
+            Endpoint::Entity(i) => Some(checked.entities[i].name.clone()),
         }
     };
     let endpoint = |name: &str| refs.get(&name.trim().to_lowercase()).copied();
@@ -264,6 +339,12 @@ pub fn check(
             checked.drop(Reason::QuoteNotFound, property);
             continue;
         };
+        if [from, to].into_iter().any(|end| {
+            name_of(&checked, end).is_some_and(|name| !names(normaliser, &relation.evidence, &name))
+        }) {
+            checked.drop(Reason::QuoteWithoutEnds, property);
+            continue;
+        }
         let relation = Relation {
             from,
             property: property.clone(),
@@ -327,6 +408,9 @@ mod tests {
             Reason::ClassName,
             Reason::RefTaken,
             Reason::DisjointClass,
+            Reason::QuoteWithoutName,
+            Reason::QuoteWithoutEnds,
+            Reason::BareTag,
         ]
         .iter()
         .map(|r| r.as_str())
@@ -344,7 +428,10 @@ mod tests {
                 "empty label",
                 "named after its class",
                 "ref already used for a known thing",
-                "class disjoint with a known thing of the same name"
+                "class disjoint with a known thing of the same name",
+                "quote does not hold the name",
+                "quote does not name both ends",
+                "bare tag, kept as a mention of the document"
             ]
         );
         let mut checked = Checked::default();
@@ -411,6 +498,7 @@ mod tests {
             &onto,
             &languages(),
             &normaliser(),
+            2,
         );
         assert_eq!(checked.entities.len(), 1);
         let entity = &checked.entities[0];
@@ -459,7 +547,7 @@ mod tests {
                     {"ref": "e2", "class": iri("Pump"), "name": "rotor", "evidence": "rotor"}
                 ],
                 "relations": [
-                    {"from": "E1", "property": iri("installedAt"), "to": "r1", "evidence": "installed at"},
+                    {"from": "E1", "property": iri("installedAt"), "to": "r1", "evidence": "booster pump is installed at the north"},
                     {"from": "e1", "property": iri("installedat"), "to": "r1", "evidence": "installed at"},
                     {"from": "e1", "property": iri("installedAt"), "to": "r1", "evidence": "installed at the north"},
                     {"from": "r1", "property": iri("installedAt"), "to": "e1", "evidence": "installed at"},
@@ -479,6 +567,7 @@ mod tests {
             &onto,
             &languages(),
             &normaliser(),
+            2,
         );
         assert_eq!(
             checked.relations,
@@ -487,8 +576,8 @@ mod tests {
                     from: Endpoint::Entity(0),
                     property: iri("installedAt"),
                     to: Endpoint::Known(0),
-                    start: 20,
-                    end: 32,
+                    start: 4,
+                    end: 42,
                 },
                 Relation {
                     from: Endpoint::Doc,
@@ -557,6 +646,7 @@ mod tests {
             &onto,
             &languages(),
             &normaliser(),
+            2,
         );
         assert_eq!(checked.entities.len(), 1);
         assert!(checked.relations.is_empty(), "{:?}", checked.relations);
@@ -575,6 +665,7 @@ mod tests {
             &onto,
             &languages(),
             &normaliser(),
+            2,
         );
         assert!(checked.entities.is_empty() && checked.drops.is_empty());
     }
@@ -598,6 +689,7 @@ mod tests {
             &onto,
             &languages(),
             &normaliser(),
+            2,
         );
         let keys: Vec<&str> = checked.entities.iter().map(|e| e.key.as_str()).collect();
         assert_eq!(keys, ["northwind pumps", "b.v."]);
@@ -633,6 +725,7 @@ mod tests {
             &onto,
             &languages(),
             &normaliser(),
+            2,
         );
         let names: Vec<&str> = checked.entities.iter().map(|e| e.name.as_str()).collect();
         assert_eq!(names, ["Booster Pump"]);
@@ -640,5 +733,103 @@ mod tests {
             checked.drops[&format!("{}|{}", Reason::DisjointClass, iri("Company"))],
             1
         );
+    }
+
+    #[test]
+    fn a_mention_quote_must_hold_the_name() {
+        let onto = ontology();
+        let built = built(&onto, &input(&[("Pump", 1)]));
+        let text = "The booster pump at the north site.";
+        let checked = check(
+            answer(serde_json::json!({
+                "entities": [
+                    {"ref": "e1", "class": iri("Pump"), "name": "booster pump", "evidence": "at the north site"},
+                    {"ref": "e2", "class": iri("Pump"), "name": "Booster  PUMP", "evidence": "the booster pump at"}
+                ],
+                "other_relations": []
+            })),
+            &built,
+            text,
+            &onto,
+            &languages(),
+            &normaliser(),
+            2,
+        );
+        assert_eq!(checked.entities.len(), 1);
+        assert_eq!(
+            checked.drops[&format!("{}|{}", Reason::QuoteWithoutName, iri("Pump"))],
+            1
+        );
+    }
+
+    #[test]
+    fn a_relation_quote_must_name_both_ends() {
+        let onto = ontology();
+        let mut chunk = input(&[("Pump", 1), ("Company", 1)]);
+        chunk.known = vec![Known {
+            entity_id: 9,
+            class: iri("Company"),
+            name: "Acme B.V.".to_string(),
+        }];
+        let built = built(&onto, &chunk);
+        let text = "Acme owns the booster pump. The booster pump is new.";
+        let checked = check(
+            answer(serde_json::json!({
+                "entities": [
+                    {"ref": "e1", "class": iri("Pump"), "name": "booster pump", "evidence": "the booster pump"}
+                ],
+                "relations": [
+                    {"from": "r1", "property": iri("owns"), "to": "e1", "evidence": "The booster pump is new"},
+                    {"from": "r1", "property": iri("owns"), "to": "e1", "evidence": "acme owns the booster pump"}
+                ],
+                "other_relations": []
+            })),
+            &built,
+            text,
+            &onto,
+            &languages(),
+            &normaliser(),
+            2,
+        );
+        assert_eq!(checked.relations.len(), 1);
+        assert_eq!(checked.relations[0].from, Endpoint::Known(0));
+        assert_eq!(
+            checked.drops[&format!("{}|{}", Reason::QuoteWithoutEnds, iri("owns"))],
+            1
+        );
+    }
+
+    #[test]
+    fn a_bare_tag_needs_a_description_or_its_class_on_the_line() {
+        let onto = ontology();
+        let built = built(&onto, &input(&[("Pump", 1)]));
+        let text = "| P-12 | 10K4 |\n| 3 | P-14 | lube oil transfer |\nP-15 pump\nboosters X-7";
+        let tag = |name: &str| {
+            serde_json::json!(
+                {"ref": name, "class": iri("Pump"), "name": name, "evidence": name}
+            )
+        };
+        let checked = check(
+            answer(serde_json::json!({
+                "entities": [tag("P-12"), tag("10K4"), tag("P-14"), tag("P-15"), tag("X-7")],
+                "other_relations": []
+            })),
+            &built,
+            text,
+            &onto,
+            &languages(),
+            &normaliser(),
+            2,
+        );
+        let names: Vec<&str> = checked.entities.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, ["P-14", "P-15"]);
+        assert_eq!(checked.doc_mentions, [(2, 6), (9, 13), (68, 71)]);
+        assert_eq!(
+            checked.drops[&format!("{}|{}", Reason::BareTag, iri("Pump"))],
+            3
+        );
+        assert!(!bare_tag("Booster pump 2"));
+        assert!(bare_tag("HI-39400"));
+        assert!(!bare_tag("KSB"));
     }
 }

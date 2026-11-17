@@ -165,15 +165,21 @@ pub fn check(answer: Answer, cluster: &Cluster, built: &Built, threshold: f64) -
             status,
             confidence: group.confidence,
         }));
-        checked.rows.extend(ids.iter().map(|&entity_id| Row {
-            entity_id,
-            class_iri: Some(class.clone()),
-            name: Some(name.clone()),
-            status,
-            confidence: group.confidence,
-        }));
+        let fixed = |id: &i64| cluster.members.iter().any(|m| m.id == *id && m.fixed);
+        checked
+            .rows
+            .extend(ids.iter().filter(|id| !fixed(id)).map(|&entity_id| Row {
+                entity_id,
+                class_iri: Some(class.clone()),
+                name: Some(name.clone()),
+                status,
+                confidence: group.confidence,
+            }));
     }
     for (entry, id) in not_entities {
+        if cluster.members.iter().any(|m| m.id == id && m.fixed) {
+            continue;
+        }
         if twice(&id) {
             checked.drop(Reason::RefTwice, &entry.member);
             continue;
@@ -262,6 +268,26 @@ mod tests {
             r.name.as_deref() == Some("Zuidwal Techniek")
                 && r.class_iri.as_deref() == Some(iri("Customer").as_str())
         }));
+    }
+
+    #[test]
+    fn a_rule_made_member_keeps_its_name_class_and_entity() {
+        let mut fixed = cluster(10);
+        fixed.members[0].fixed = true;
+        let checked = run(
+            answer(
+                vec![group(&["m1", "M2"], "zuidwal techniek", "Customer", 0.95)],
+                &[],
+            ),
+            &fixed,
+        );
+        assert_eq!(checked.links.len(), 1);
+        assert_eq!(
+            checked.rows.iter().map(|r| r.entity_id).collect::<Vec<_>>(),
+            [15]
+        );
+        let checked = run(answer(vec![], &["m1"]), &fixed);
+        assert!(checked.rows.is_empty(), "{:?}", checked.rows);
     }
 
     #[test]

@@ -2,7 +2,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 
-const BUILT_IN: [(&str, &str); 10] = [
+const BUILT_IN: [(&str, &str); 22] = [
     ("fit-system", include_str!("../../prompts/fit-system.md")),
     ("fit-user", include_str!("../../prompts/fit-user.md")),
     (
@@ -34,6 +34,54 @@ const BUILT_IN: [(&str, &str); 10] = [
         include_str!("../../prompts/curate-system.md"),
     ),
     ("curate-user", include_str!("../../prompts/curate-user.md")),
+    (
+        "eval-world-system",
+        include_str!("../../prompts/eval-world-system.md"),
+    ),
+    (
+        "eval-world-user",
+        include_str!("../../prompts/eval-world-user.md"),
+    ),
+    (
+        "eval-join-system",
+        include_str!("../../prompts/eval-join-system.md"),
+    ),
+    (
+        "eval-join-user",
+        include_str!("../../prompts/eval-join-user.md"),
+    ),
+    (
+        "eval-judge-system",
+        include_str!("../../prompts/eval-judge-system.md"),
+    ),
+    (
+        "eval-judge-user",
+        include_str!("../../prompts/eval-judge-user.md"),
+    ),
+    (
+        "eval-questions-system",
+        include_str!("../../prompts/eval-questions-system.md"),
+    ),
+    (
+        "eval-questions-user",
+        include_str!("../../prompts/eval-questions-user.md"),
+    ),
+    (
+        "eval-answer-system",
+        include_str!("../../prompts/eval-answer-system.md"),
+    ),
+    (
+        "eval-answer-user",
+        include_str!("../../prompts/eval-answer-user.md"),
+    ),
+    (
+        "eval-attributes-system",
+        include_str!("../../prompts/eval-attributes-system.md"),
+    ),
+    (
+        "eval-attributes-user",
+        include_str!("../../prompts/eval-attributes-user.md"),
+    ),
 ];
 
 pub struct Prompt {

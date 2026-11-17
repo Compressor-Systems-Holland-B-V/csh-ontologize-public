@@ -34,6 +34,8 @@ pub struct Config {
     pub resolve: ResolveConfig,
     pub export: ExportConfig,
     pub eval: EvalConfig,
+    #[serde(default)]
+    pub run: RunConfig,
 
     pub gpu: GpuConfig,
     #[serde(default)]
@@ -48,18 +50,20 @@ pub struct ModelsConfig {
     pub classify: String,
     pub attributes: String,
     pub curate: String,
+    pub eval: String,
     pub embed: String,
     pub chars_per_token: f64,
 }
 
 impl ModelsConfig {
-    pub fn llm_tasks(&self) -> [(&'static str, &str); 5] {
+    pub fn llm_tasks(&self) -> [(&'static str, &str); 6] {
         [
             ("fit", &self.fit),
             ("extract", &self.extract),
             ("classify", &self.classify),
             ("attributes", &self.attributes),
             ("curate", &self.curate),
+            ("eval", &self.eval),
         ]
     }
 }
@@ -88,6 +92,8 @@ pub struct EmbedConfig {
 pub struct ResolveConfig {
     pub strip_words: Vec<String>,
     pub fuzzy_score: f64,
+    #[serde(default = "default_fuzzy_auto")]
+    pub fuzzy_auto: f64,
     pub embed_score: f64,
     pub max_candidates: usize,
     pub max_block: usize,
@@ -126,6 +132,7 @@ pub struct AttributesConfig {
     #[serde(default)]
     pub resend_share: Option<f64>,
     pub threads: usize,
+    pub min_line_words: usize,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -201,6 +208,16 @@ pub struct ClaudeCodeConfig {
     pub timeout_secs: u64,
     pub max_window_use: f64,
     pub config_dirs: Vec<String>,
+    #[serde(default)]
+    pub account_window_use: BTreeMap<String, f64>,
+}
+
+impl ClaudeCodeConfig {
+    pub fn window_use(&self, dir: Option<&str>) -> f64 {
+        dir.and_then(|dir| self.account_window_use.get(dir))
+            .copied()
+            .unwrap_or(self.max_window_use)
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -265,6 +282,7 @@ pub struct LlmExtractConfig {
     pub sources: Vec<String>,
     pub doc_types: Vec<String>,
     pub paths: Vec<String>,
+    pub skip_paths: Vec<String>,
     pub exclude: Vec<String>,
     pub seed: String,
     pub max_per_document: usize,
@@ -279,6 +297,9 @@ pub struct LlmExtractConfig {
     pub read_batch: i64,
     pub definition_chars: usize,
     pub max_known: usize,
+    pub min_tag_words: usize,
+    pub repeated_line_files: usize,
+    pub quote_headers: Vec<String>,
     pub threads: usize,
 }
 
@@ -292,6 +313,18 @@ pub struct CurateConfig {
     pub definition_chars: usize,
     pub out: String,
     pub not_in_class: BTreeMap<String, Vec<String>>,
+    #[serde(default)]
+    pub folder_classes: Vec<String>,
+    #[serde(default)]
+    pub gazetteer: String,
+    #[serde(default = "default_gazetteer_documents")]
+    pub gazetteer_documents: i64,
+    #[serde(default)]
+    pub gazetteer_classes: Vec<String>,
+}
+
+fn default_gazetteer_documents() -> i64 {
+    3
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -329,8 +362,68 @@ impl GpuConfig {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+pub struct RunConfig {
+    pub summary: String,
+    #[serde(default)]
+    pub set: String,
+    pub targets: RunTargets,
+}
+
+impl Default for RunConfig {
+    fn default() -> RunConfig {
+        RunConfig {
+            summary: "summary.md".to_string(),
+            set: String::new(),
+            targets: RunTargets::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunTargets {
+    pub found: f64,
+    pub duplicates: f64,
+    pub class_accuracy: f64,
+    pub mentions: f64,
+    pub relations: f64,
+    pub attributes: f64,
+    pub catch_rate: f64,
+}
+
+impl Default for RunTargets {
+    fn default() -> RunTargets {
+        RunTargets {
+            found: 0.9,
+            duplicates: 0.05,
+            class_accuracy: 0.9,
+            mentions: 0.9,
+            relations: 0.9,
+            attributes: 0.85,
+            catch_rate: 0.9,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct EvalConfig {
-    pub world: String,
+    pub dir: String,
+    pub summary: String,
+    pub seed: String,
+    pub docs_per_kind: usize,
+    pub min_doc_chars: usize,
+    pub max_doc_chars: usize,
+    pub request_chars: usize,
+    pub questions: usize,
+    pub attribute_chunks: usize,
+    pub judge_batch: usize,
+    pub judge_context: usize,
+    pub judge_mentions: usize,
+    pub judge_relations: usize,
+    pub judge_attributes: usize,
+    pub planted: usize,
+    pub min_catch_rate: f64,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -338,6 +431,16 @@ pub struct EvalConfig {
 pub struct ReviewConfig {
     pub sample: usize,
     pub min_verdicts: usize,
+    #[serde(default = "default_checked")]
+    pub checked: f64,
+}
+
+fn default_fuzzy_auto() -> f64 {
+    1.01
+}
+
+fn default_checked() -> f64 {
+    0.8
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -769,6 +872,16 @@ fn check(config: &Config) -> Result<(), String> {
             config.chunk.text_search
         ));
     }
+    let eval = &config.eval;
+    if eval.judge_batch == 0 || eval.request_chars == 0 || eval.max_doc_chars == 0 {
+        return Err(
+            "eval.judge_batch, eval.request_chars and eval.max_doc_chars must be greater than 0"
+                .to_string(),
+        );
+    }
+    if !(0.0..=1.0).contains(&eval.min_catch_rate) {
+        return Err("eval.min_catch_rate must be between 0 and 1".to_string());
+    }
     check_models(config)?;
     check_globs("scan.ignore", &config.scan.ignore)?;
     let mut extensions = BTreeMap::new();
@@ -839,6 +952,18 @@ fn check_models(config: &Config) -> Result<(), String> {
         );
     }
     let dirs = &providers.claude_code.config_dirs;
+    for (dir, limit) in &providers.claude_code.account_window_use {
+        if !dirs.contains(dir) {
+            return Err(format!(
+                "providers.claude-code.account_window_use names {dir:?}, which is not in config_dirs"
+            ));
+        }
+        if !(*limit > 0.0 && *limit <= 1.0) {
+            return Err(format!(
+                "providers.claude-code.account_window_use for {dir:?} must be greater than 0 and at most 1"
+            ));
+        }
+    }
     for (n, dir) in dirs.iter().enumerate() {
         if dir.trim().is_empty() {
             return Err("providers.claude-code.config_dirs has an empty entry".to_string());
@@ -1183,6 +1308,18 @@ mod tests {
         let dir = dir_with("[providers.claude-code]\nconfig_dirs = [\"~/.a\", \" \"]\n");
         let message = error(load_from(Some(dir.path()), vars(&[])));
         assert!(message.contains("empty entry"), "{message}");
+        let dir = dir_with(
+            "[providers.claude-code]\nconfig_dirs = [\"~/.a\", \"~/.b\"]\naccount_window_use = { \"~/.b\" = 0.95 }\n",
+        );
+        let config = load_from(Some(dir.path()), vars(&[])).unwrap();
+        let claude = &config.providers.claude_code;
+        assert_eq!(claude.window_use(Some("~/.b")), 0.95);
+        assert_eq!(claude.window_use(Some("~/.a")), 0.8);
+        let dir = dir_with(
+            "[providers.claude-code]\nconfig_dirs = [\"~/.a\"]\naccount_window_use = { \"~/.c\" = 0.5 }\n",
+        );
+        let message = error(load_from(Some(dir.path()), vars(&[])));
+        assert!(message.contains("not in config_dirs"), "{message}");
         let dir =
             dir_with("[models]\nfit = \"ollama:qwen3.5:4b\"\n[providers.ollama]\nthink = true\n");
         let config = load_from(Some(dir.path()), vars(&[])).unwrap();
@@ -1477,7 +1614,7 @@ mod tests {
         let tasks: Vec<&str> = models.llm_tasks().iter().map(|(task, _)| *task).collect();
         assert_eq!(
             tasks,
-            ["fit", "extract", "classify", "attributes", "curate"]
+            ["fit", "extract", "classify", "attributes", "curate", "eval"]
         );
     }
 

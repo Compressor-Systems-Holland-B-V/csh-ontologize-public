@@ -8,9 +8,6 @@ files = ["../acme/ontology/acme.ttl", "../acme/ontology/units.ttl", "ontology/pe
 include = ["acme:Organisation", "acme:Site", "acme:Project", "acme:Procedure", "acme:Equipment", "acme:Document", "acme:Person"]
 document_class = "acme:Document"
 
-[eval]
-world = "../../data/tests/world.csv"
-
 [[sources]]
 name = "tests"
 kind = "folder"

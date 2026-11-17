@@ -1,0 +1,32 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["entities"],
+  "properties": {
+    "entities": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "class", "spellings"],
+        "properties": {
+          "name": {"type": "string"},
+          "class": {"type": "string"},
+          "spellings": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["text", "file", "quote"],
+              "properties": {
+                "text": {"type": "string"},
+                "file": {"type": "string"},
+                "quote": {"type": "string"}
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

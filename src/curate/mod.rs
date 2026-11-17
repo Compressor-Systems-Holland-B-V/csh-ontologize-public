@@ -57,6 +57,7 @@ pub struct Member {
     pub mentions: i64,
     pub snippets: Vec<String>,
     pub relations: Vec<Relation>,
+    pub fixed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -278,6 +279,84 @@ pub fn sources(components: &[Component]) -> [(&'static str, usize); 4] {
             count(&|c| c.hits.iter().any(|h| h.source == Source::Disjoint)),
         ),
     ]
+}
+
+pub fn with_folders(
+    mut components: Vec<Component>,
+    pairs: &[(i64, i64, String)],
+) -> Vec<Component> {
+    for (model, project, name) in pairs {
+        let hit = Hit {
+            id: *model,
+            source: Source::Relation,
+            reason: format!(
+                "named in the documents of {name}; the same thing, another thing or not a project"
+            ),
+        };
+        match components.iter_mut().find(|c| c.ids.contains(model)) {
+            Some(component) => {
+                if !component.ids.contains(project) {
+                    component.ids.push(*project);
+                }
+                component.hits.push(hit);
+            }
+            None => components.push(Component {
+                ids: vec![*model, *project],
+                links: Vec::new(),
+                hits: vec![hit],
+            }),
+        }
+    }
+    components
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, serde::Serialize)]
+pub struct GazetteerRow {
+    pub class: String,
+    pub key: String,
+    pub name: String,
+    #[serde(default)]
+    pub aliases: String,
+    #[serde(default)]
+    pub lang: String,
+}
+
+pub fn gazetteer(previous: &str, found: Vec<GazetteerRow>) -> Result<String> {
+    let mut rows: BTreeMap<(String, String), GazetteerRow> = BTreeMap::new();
+    let mut reader = csv::ReaderBuilder::new()
+        .trim(csv::Trim::All)
+        .from_reader(previous.as_bytes());
+    for row in reader.deserialize::<GazetteerRow>() {
+        let row = row?;
+        rows.insert((row.class.clone(), row.key.clone()), row);
+    }
+    for row in found {
+        let slot = rows
+            .entry((row.class.clone(), row.key.clone()))
+            .or_insert_with(|| GazetteerRow {
+                aliases: String::new(),
+                ..row.clone()
+            });
+        let mut aliases: std::collections::BTreeSet<String> = slot
+            .aliases
+            .split('|')
+            .chain(row.aliases.split('|'))
+            .map(str::trim)
+            .filter(|a| !a.is_empty() && *a != slot.name)
+            .map(str::to_string)
+            .collect();
+        aliases.remove(&slot.name);
+        slot.aliases = aliases.into_iter().collect::<Vec<_>>().join("|");
+    }
+    let mut writer = csv::Writer::from_writer(Vec::new());
+    if rows.is_empty() {
+        writer.write_record(["class", "key", "name", "aliases", "lang"])?;
+    }
+    for row in rows.values() {
+        writer.serialize(row)?;
+    }
+    let bytes = writer.into_inner().map_err(|e| anyhow::anyhow!("{e}"))?;
+    Ok(String::from_utf8(bytes)?)
 }
 
 pub fn components(
@@ -584,6 +663,7 @@ pub mod tests {
                 name: "Havenstad".to_string(),
                 class: iri("Site"),
             }],
+            fixed: false,
         }
     }
 
@@ -594,6 +674,54 @@ pub mod tests {
             method: method.to_string(),
             confidence: 0.93,
         }
+    }
+
+    #[test]
+    fn model_projects_join_the_project_of_their_folder() {
+        let existing = Component {
+            ids: vec![3, 4],
+            links: Vec::new(),
+            hits: Vec::new(),
+        };
+        let pairs = [
+            (4, 1, "P-1 Harbour".to_string()),
+            (7, 1, "P-1 Harbour".to_string()),
+        ];
+        let out = with_folders(vec![existing], &pairs);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].ids, [3, 4, 1]);
+        assert_eq!(out[1].ids, [7, 1]);
+        assert!(out[1].hits[0].reason.contains("P-1 Harbour"));
+    }
+
+    #[test]
+    fn the_generated_gazetteer_only_grows_and_joins_aliases() {
+        let row = |key: &str, name: &str, aliases: &str| GazetteerRow {
+            class: "ex:Project".to_string(),
+            key: key.to_string(),
+            name: name.to_string(),
+            aliases: aliases.to_string(),
+            lang: String::new(),
+        };
+        let first = gazetteer(
+            "",
+            vec![row("P-1", "P-1 Harbour", "P-1 Harbour|Blue Whale")],
+        )
+        .unwrap();
+        assert_eq!(
+            first,
+            "class,key,name,aliases,lang\nex:Project,P-1,P-1 Harbour,Blue Whale,\n"
+        );
+        let second = gazetteer(
+            &first,
+            vec![row("P-1", "P-1 Harbour", "BW-7"), row("P-2", "P-2", "")],
+        )
+        .unwrap();
+        assert_eq!(
+            second,
+            "class,key,name,aliases,lang\nex:Project,P-1,P-1 Harbour,BW-7|Blue Whale,\nex:Project,P-2,P-2,,\n"
+        );
+        assert_eq!(gazetteer(&second, vec![]).unwrap(), second);
     }
 
     pub fn cluster(first: i64) -> Cluster {
