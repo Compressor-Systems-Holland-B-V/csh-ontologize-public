@@ -11,6 +11,16 @@ create or replace function {api}.tier(method text, status text, confidence doubl
     end
 $$;
 
+create or replace function {api}.entity_tier(class_iri text, method text, confidence double precision,
+    confirmed boolean)
+    returns text language sql immutable as $$
+    select case
+        when not confirmed and class_iri = any({rule_classes})
+            and (method like 'llm:%' or method like '%:llm:%') then 'proposal'
+        else {api}.tier(method, 'auto', confidence)
+    end
+$$;
+
 create or replace view {api}.sources as
 select id, name, kind, root, dataset
 from {schema}.sources;
@@ -37,8 +47,10 @@ where exists (select 1 from {schema}.documents d
 
 create or replace view {api}.entities as
 select id, class_iri, key, name, props, dataset, method, confidence, document_id,
-    canonical_id, {api}.tier(method, 'auto', confidence) as tier
-from {schema}.entities;
+    canonical_id, {api}.entity_tier(class_iri, method, confidence, exists (
+        select 1 from {schema}.entity_classes x where x.entity_id = e.id and x.status = 'confirmed'))
+        as tier
+from {schema}.entities e;
 
 create or replace view {api}.entity_classes as
 select entity_id, class_iri, name, method, status, confidence, ontology_version_id, created_at
@@ -66,7 +78,9 @@ select r.id, coalesce(o.class_iri, r.class_iri) as class_iri, r.key,
             and x.status in ('auto', 'confirmed') and x.class_iri is null)
     ) n where n.name <> coalesce(o.name, r.name)), array[]::text[]) as aliases,
     (select case when bool_or(t = 'rule') then 'rule' when bool_or(t = 'checked') then 'checked'
-        else 'proposal' end from (select {api}.tier(m.method, 'auto', m.confidence) as t
+        else 'proposal' end from (select {api}.entity_tier(m.class_iri, m.method, m.confidence, exists (
+            select 1 from {schema}.entity_classes x
+            where x.entity_id = m.id and x.status = 'confirmed')) as t
         from {schema}.entities m where m.id = r.id or m.canonical_id = r.id) x) as tier
 from {schema}.entities r
 left join {schema}.entity_classes o on o.entity_id = r.id and o.status in ('auto', 'confirmed')

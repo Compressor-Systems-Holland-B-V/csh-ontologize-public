@@ -229,6 +229,7 @@ The defaults work for most data. Commonly changed:
 | `review.sample` | `50` | Facts shown by `review sample` |
 | `review.min_verdicts` | `30` | Reviews of a class or property before they set its confidence (0: never) |
 | `review.checked` | `0.8` | Confidence from which a model fact is in the `checked` tier of the API views; below it is a `proposal` |
+| `review.rule_classes` | `[]` | Classes a model alone cannot make: an entity of one of them that only the model made is a `proposal` in the API views until it joins a rule-made entity or a person confirms it |
 | `run.summary` | `"summary.md"` | Where `zontologize run` writes its summary (Markdown, plus a `.json` beside it with the numbers of the last finished run, for the change column) |
 | `run.set` | `""` | Gold set (`eval draft --set`) that `run` scores against; with it, `run` also runs the judge (`review sample --judge`); empty: the run ends without numbers |
 | `run.targets` | `{ found = 0.9, duplicates = 0.05, class_accuracy = 0.9, mentions = 0.9, relations = 0.9, attributes = 0.85, catch_rate = 0.9 }` | Targets for the verdicts in the run summary: good when met, fair within 10 points, poor beyond |

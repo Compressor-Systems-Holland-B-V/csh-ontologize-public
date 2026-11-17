@@ -433,6 +433,8 @@ pub struct ReviewConfig {
     pub min_verdicts: usize,
     #[serde(default = "default_checked")]
     pub checked: f64,
+    #[serde(default)]
+    pub rule_classes: Vec<String>,
 }
 
 fn default_fuzzy_auto() -> f64 {

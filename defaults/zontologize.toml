@@ -200,6 +200,7 @@ device = 0
 sample = 50
 min_verdicts = 30
 checked = 0.8
+rule_classes = []
 
 [run]
 summary = "summary.md"

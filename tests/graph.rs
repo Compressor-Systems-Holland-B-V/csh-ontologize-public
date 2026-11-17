@@ -434,6 +434,37 @@ async fn the_views_keep_their_contract() {
             .await;
         assert_eq!(found, 1, "{method} {status} {confidence}");
     }
+    let mut conn = zontologize::db::connect(Some(&common::test_url()), &env.schema)
+        .await
+        .unwrap();
+    zontologize::db::api::create(
+        &mut conn,
+        &env.schema,
+        &format!("{}_api", env.schema),
+        0.8,
+        &["urn:t#Project".to_string()],
+    )
+    .await
+    .unwrap();
+    zontologize::db::close(conn).await;
+    for (class, method, confirmed, tier) in [
+        ("urn:t#Project", "llm:claude-code:sonnet", false, "proposal"),
+        ("urn:t#Project", "llm:claude-code:sonnet", true, "checked"),
+        ("urn:t#Project", "path", false, "rule"),
+        (
+            "urn:t#Organisation",
+            "llm:claude-code:sonnet",
+            false,
+            "checked",
+        ),
+    ] {
+        let found = env
+            .count(&format!(
+                "select ({api}.entity_tier('{class}', '{method}', 0.9, {confirmed}) = '{tier}')::int::bigint"
+            ))
+            .await;
+        assert_eq!(found, 1, "{class} {method} {confirmed}");
+    }
 
     let documents = env
         .count(&format!("select count(*) from {api}.documents"))

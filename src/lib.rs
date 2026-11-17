@@ -31,13 +31,21 @@ use anyhow::{Context, Result};
 
 pub async fn db_migrate(config_dir: Option<&Path>) -> Result<ExitCode> {
     let config = config::load(config_dir)?;
+    let ontology = ontology::load_or_empty(config_dir, &config.ontology)?;
+    let rule_classes: Vec<String> = config
+        .review
+        .rule_classes
+        .iter()
+        .map(|c| ontology.class(c).map(|c| c.iri.clone()))
+        .collect::<Result<_, _>>()
+        .map_err(|e| anyhow::anyhow!("review.rule_classes: {e}"))?;
     let schema = &config.database.schema;
     let mut conn = db::connect(database_url().as_deref(), schema).await?;
     let api = &config.database.api_schema;
     let result = async {
         db::runs::take_lock(&mut conn, schema).await?;
         let applied = db::migrate::run(&mut conn, schema).await?;
-        db::api::create(&mut conn, schema, api, config.review.checked).await?;
+        db::api::create(&mut conn, schema, api, config.review.checked, &rule_classes).await?;
         anyhow::Ok(applied)
     }
     .await;

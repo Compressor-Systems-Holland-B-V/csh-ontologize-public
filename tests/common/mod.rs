@@ -37,7 +37,7 @@ impl Env {
         drop_schema(&schema).await;
         let mut conn = db::connect(Some(&test_url()), &schema).await.unwrap();
         db::migrate::run(&mut conn, &schema).await.unwrap();
-        db::api::create(&mut conn, &schema, &format!("{schema}_api"), 0.8)
+        db::api::create(&mut conn, &schema, &format!("{schema}_api"), 0.8, &[])
             .await
             .unwrap();
         db::close(conn).await;
