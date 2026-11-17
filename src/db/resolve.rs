@@ -6,7 +6,8 @@ use sqlx::{FromRow, PgExecutor, PgPool};
 pub const SAME_AS: &str = crate::ns::OWL_SAME_AS;
 pub const REFERENCES: &str = crate::ns::DCTERMS_REFERENCES;
 pub const REPLACES: &str = crate::ns::DCTERMS_REPLACES;
-pub const BUILT_IN: [&str; 3] = [SAME_AS, REFERENCES, REPLACES];
+pub const MENTIONED_IN: &str = crate::ns::DCTERMS_IS_REFERENCED_BY;
+pub const BUILT_IN: [&str; 4] = [SAME_AS, REFERENCES, REPLACES, MENTIONED_IN];
 
 #[derive(Debug, Clone, FromRow)]
 pub struct EntityRow {
@@ -301,6 +302,31 @@ pub async fn references<'e>(db: impl PgExecutor<'e>, classes: &[String]) -> Resu
          order by sa.id, sb.id, m.chunk_id, m.span_start",
     )
     .bind(classes)
+    .fetch_all(db)
+    .await?;
+    Ok(rows)
+}
+
+#[derive(Debug, Clone, FromRow)]
+pub struct Mentioned {
+    pub src_id: i64,
+    pub dst_id: i64,
+    pub document_id: i64,
+    pub mentions: i64,
+}
+
+pub async fn mentioned_in<'e>(db: impl PgExecutor<'e>) -> Result<Vec<Mentioned>> {
+    let rows = sqlx::query_as(
+        "select t.id as src_id, de.id as dst_id, d.id as document_id, count(*) as mentions \
+         from mentions m \
+         join entities t on t.id = m.entity_id \
+         and (t.document_id is null or t.key <> t.document_id::text) \
+         left join chunks k on k.id = m.chunk_id \
+         join documents d on d.status = 'present' \
+         and (d.id = m.document_id or (m.document_id is null and d.content_id = k.content_id)) \
+         join entities de on de.document_id = d.id and de.key = d.id::text \
+         group by t.id, de.id, d.id order by t.id, de.id",
+    )
     .fetch_all(db)
     .await?;
     Ok(rows)

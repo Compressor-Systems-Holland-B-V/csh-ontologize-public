@@ -65,6 +65,15 @@ enum Command {
     Curate(JobArgs),
     #[command(subcommand, about = "Human decisions from a consumer app")]
     Decisions(DecisionsCommand),
+    #[command(about = "Run every stage in order, measure and write the run summary")]
+    Run {
+        #[arg(
+            long,
+            value_name = "USD",
+            help = "Stop when the whole run has billed this much"
+        )]
+        max_usd: Option<f64>,
+    },
     #[command(subcommand, about = "Evaluation commands")]
     Eval(EvalCommand),
     #[command(subcommand, about = "Fact review commands")]
@@ -242,10 +251,54 @@ struct EmbedArgs {
 
 #[derive(Debug, Subcommand)]
 enum EvalCommand {
-    #[command(about = "Compare found entities and clusters with the world list in [eval] world")]
-    Entities,
+    #[command(
+        about = "Compare found entities and clusters with the world list of a frozen gold set and write the numbers to [eval] summary"
+    )]
+    Entities {
+        #[arg(
+            long,
+            value_name = "NAME",
+            help = "Gold set made by eval draft; its newest version's world.csv is used"
+        )]
+        set: Option<String>,
+        #[arg(
+            long,
+            value_name = "FILE",
+            help = "World list (name,variant,class) to use instead of a gold set"
+        )]
+        world: Option<PathBuf>,
+    },
+    #[command(
+        about = "Make a gold file from the documents with the eval model: grounded, made twice and judged"
+    )]
+    Draft {
+        #[arg(long, value_name = "NAME", help = "Name of the gold set")]
+        set: String,
+        #[arg(
+            long,
+            value_name = "WHAT",
+            value_parser = ["world", "questions", "attributes"],
+            help = "Gold file to make"
+        )]
+        what: String,
+        #[arg(
+            long,
+            value_name = "NAMES",
+            value_delimiter = ',',
+            help = "First-level folders to read, comma separated (default: all)"
+        )]
+        folders: Vec<String>,
+        #[command(flatten)]
+        job: JobArgs,
+    },
     #[command(about = "Compare embedding models on a sample of the own data")]
     Embed {
+        #[arg(
+            long,
+            value_name = "FILE",
+            help = "Questions file to use instead of questions.toml in the config directory"
+        )]
+        questions: Option<PathBuf>,
         #[arg(
             long,
             value_name = "NAMES",
@@ -295,9 +348,16 @@ enum ReviewCommand {
         #[arg(
             long,
             value_name = "SEED",
-            help = "Seed of the draw (default: the current time)"
+            help = "Seed of the draw (default: the current time; with --judge: [eval] seed)"
         )]
         seed: Option<String>,
+        #[arg(
+            long,
+            help = "Let the eval model judge a stratified sample of facts mixed with planted errors, per [eval] judge_*"
+        )]
+        judge: bool,
+        #[command(flatten)]
+        job: JobArgs,
     },
     #[command(about = "Show proposed links between entities and confirm or reject each")]
     Merges {
@@ -469,8 +529,28 @@ fn main() -> ExitCode {
             Command::Decisions(DecisionsCommand::Apply) => {
                 zontologize::decisions_apply(config).await
             }
-            Command::Eval(EvalCommand::Entities) => zontologize::eval_entities(config).await,
+            Command::Eval(EvalCommand::Entities { set, world }) => {
+                zontologize::eval_entities(config, set.as_deref(), world.as_deref()).await
+            }
+            Command::Eval(EvalCommand::Draft {
+                set,
+                what,
+                folders,
+                job,
+            }) => match zontologize::eval::draft::What::parse(&what) {
+                Some(what) => {
+                    let options = zontologize::eval::draft::DraftOptions {
+                        set,
+                        what,
+                        folders,
+                        job: job.options(),
+                    };
+                    zontologize::eval_draft(config, &options).await
+                }
+                None => Err(anyhow::anyhow!("--what {what:?} is not known")),
+            },
             Command::Eval(EvalCommand::Embed {
+                questions,
                 models,
                 sample,
                 seed,
@@ -479,14 +559,30 @@ fn main() -> ExitCode {
                     models,
                     sample,
                     seed,
+                    questions,
                 };
                 zontologize::eval_embed(config, &options).await
+            }
+            Command::Review(ReviewCommand::Sample {
+                method,
+                seed,
+                judge: true,
+                job,
+                ..
+            }) => {
+                let options = zontologize::eval::judge::JudgeOptions {
+                    method,
+                    seed,
+                    job: job.options(),
+                };
+                zontologize::review_judge(config, &options).await
             }
             Command::Review(ReviewCommand::Sample {
                 n,
                 method,
                 class,
                 seed,
+                ..
             }) => {
                 let options = zontologize::review::Options {
                     n,
@@ -512,6 +608,7 @@ fn main() -> ExitCode {
                 };
                 zontologize::review_classes(config, &options).await
             }
+            Command::Run { max_usd } => zontologize::run(config, max_usd).await,
             Command::Status { errors } => zontologize::status(config, errors).await,
             Command::ExtractWorker => zontologize::extract_worker().await,
         }

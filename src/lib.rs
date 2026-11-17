@@ -15,6 +15,7 @@ pub mod hash;
 pub mod llm;
 pub mod ns;
 pub mod ontology;
+pub mod pipeline;
 pub mod resolve;
 pub mod review;
 pub mod rules;
@@ -36,7 +37,7 @@ pub async fn db_migrate(config_dir: Option<&Path>) -> Result<ExitCode> {
     let result = async {
         db::runs::take_lock(&mut conn, schema).await?;
         let applied = db::migrate::run(&mut conn, schema).await?;
-        db::api::create(&mut conn, schema, api).await?;
+        db::api::create(&mut conn, schema, api, config.review.checked).await?;
         anyhow::Ok(applied)
     }
     .await;
@@ -170,7 +171,7 @@ pub async fn db_check(config_dir: Option<&Path>) -> Result<ExitCode> {
     })
 }
 
-fn database_url() -> Option<String> {
+pub(crate) fn database_url() -> Option<String> {
     std::env::var("DATABASE_URL").ok()
 }
 
@@ -364,10 +365,30 @@ pub async fn embed(config_dir: Option<&Path>, options: &embed::run::Options) -> 
     Ok(ExitCode::SUCCESS)
 }
 
-pub async fn eval_entities(config_dir: Option<&Path>) -> Result<ExitCode> {
-    let scores = eval::run(config_dir, database_url().as_deref()).await?;
+pub async fn eval_entities(
+    config_dir: Option<&Path>,
+    set: Option<&str>,
+    world: Option<&Path>,
+) -> Result<ExitCode> {
+    let scores = eval::run(config_dir, database_url().as_deref(), set, world).await?;
     print!("{}", eval::table(&scores));
     Ok(ExitCode::SUCCESS)
+}
+
+pub async fn eval_draft(
+    config_dir: Option<&Path>,
+    options: &eval::draft::DraftOptions,
+) -> Result<ExitCode> {
+    let outcome = eval::draft::run(config_dir, database_url().as_deref(), options).await?;
+    Ok(exit_code(outcome))
+}
+
+pub async fn review_judge(
+    config_dir: Option<&Path>,
+    options: &eval::judge::JudgeOptions,
+) -> Result<ExitCode> {
+    let outcome = eval::judge::run(config_dir, database_url().as_deref(), options).await?;
+    Ok(exit_code(outcome))
 }
 
 pub async fn eval_embed(
@@ -638,6 +659,14 @@ pub async fn extract_worker() -> Result<ExitCode> {
     let input = tokio::io::BufReader::new(tokio::io::stdin());
     scan::worker::serve(input, tokio::io::stdout()).await?;
     Ok(ExitCode::SUCCESS)
+}
+
+pub async fn run(config_dir: Option<&Path>, max_usd: Option<f64>) -> Result<ExitCode> {
+    let options = pipeline::Options {
+        max_usd,
+        claude_program: llm::claude_program(),
+    };
+    pipeline::run(config_dir, &options).await
 }
 
 pub async fn status(config_dir: Option<&Path>, all_errors: bool) -> Result<ExitCode> {

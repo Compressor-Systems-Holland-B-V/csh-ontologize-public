@@ -1,6 +1,6 @@
 [package]
 name = "zontologize"
-version = "1.4.0"
+version = "1.5.0"
 edition = "2024"
 authors = ["Arsalan Anwari"]
 description = "Turn folders of documents into a knowledge graph in PostgreSQL, shaped by an OWL ontology."

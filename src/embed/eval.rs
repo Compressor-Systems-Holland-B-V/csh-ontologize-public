@@ -28,6 +28,7 @@ pub struct Options {
     pub models: Vec<String>,
     pub sample: Option<usize>,
     pub seed: Option<String>,
+    pub questions: Option<PathBuf>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -149,8 +150,12 @@ pub fn read_questions(config_dir: Option<&Path>) -> Result<Vec<Question>> {
     if !path.exists() {
         return Ok(Vec::new());
     }
-    let text = std::fs::read_to_string(&path)
-        .with_context(|| format!("cannot read {}", path.display()))?;
+    read_questions_file(&path)
+}
+
+pub fn read_questions_file(path: &Path) -> Result<Vec<Question>> {
+    let text =
+        std::fs::read_to_string(path).with_context(|| format!("cannot read {}", path.display()))?;
     let file: QuestionsFile = toml::from_str(&text)
         .map_err(|e| anyhow!("{}: {}", path.display(), e.to_string().trim_end()))?;
     Ok(file.questions)
@@ -506,7 +511,10 @@ pub async fn run(
         );
     }
     let ontology = crate::ontology::load_or_empty(config_dir, &config.ontology)?;
-    let questions = read_questions(config_dir)?;
+    let questions = match &options.questions {
+        Some(path) => read_questions_file(path)?,
+        None => read_questions(config_dir)?,
+    };
     let seed = options
         .seed
         .clone()

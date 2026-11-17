@@ -103,6 +103,11 @@ TITLES = {
     "png": {"nl": "Typeplaat", "en": "Name plate"},
 }
 
+SPARES = {
+    "nl": "De reservedelen voor {project} staan op nummer {spares}.",
+    "en": "The spare parts for {project} are booked on number {spares}.",
+}
+
 SENTENCES = {
     "nl": [
         "Op {date} is de {item} op locatie {site} gecontroleerd door {person}.",
@@ -166,6 +171,7 @@ class World:
             self.projects.append({
                 "lang": lang, "client": client, "year": year, "code": code,
                 "site": rng.choice(self.sites), "index": i,
+                "spares": f"NP-{year % 10}{code[-4:]}" if i % 10 == 0 else None,
             })
         spell = random.Random(f"variants-{rng.random()}")
         self.classes = {}
@@ -202,6 +208,7 @@ class World:
         rows = [(name, variant, self.classes[name])
                 for name, variants in self.variants.items() for variant in variants]
         rows += [(p["code"], p["code"], "acme:Project") for p in self.projects]
+        rows += [(p["spares"], p["spares"], "acme:Project") for p in self.projects if p["spares"]]
         rows = list(dict.fromkeys(rows))
         owner = {}
         for name, variant, _ in rows:
@@ -243,6 +250,8 @@ def make_doc(rng, world, project, kind, pages):
         sentences = [fill(rng, world, project, rng.choice(SENTENCES[lang]))
                      for _ in range(rng.randint(3, 6))]
         paragraphs.append(" ".join(sentences))
+    if project["spares"]:
+        paragraphs.append(SPARES[lang].format(project=project["code"], spares=project["spares"]))
     rows = []
     for line in range(1, rng.randint(4, 25)):
         qty = rng.randint(1, 20)

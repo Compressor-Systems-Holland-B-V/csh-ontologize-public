@@ -20,7 +20,6 @@ use crate::units::{UnitFinder, UnitIndex};
 pub const TASK: &str = "attributes";
 pub const CACHE_VERSION: u32 = 1;
 pub const CHECK_VERSION: u32 = 2;
-pub const DOC: &str = "doc";
 pub const USER_VARIABLES: [&str; 6] = [
     "path",
     "pages",
@@ -62,7 +61,6 @@ pub struct ChunkInput {
     pub path: String,
     pub pages: String,
     pub known: Vec<Subject>,
-    pub doc: Option<Subject>,
 }
 
 #[derive(Debug, Clone)]
@@ -192,12 +190,10 @@ fn subject_lines(ontology: &Ontology, subjects: &[Subject], languages: &[String]
     let mut out = String::new();
     for subject in subjects {
         let class = class_name(ontology, &subject.class, languages);
-        let name = if subject.reference == DOC {
-            "this document"
-        } else {
-            &subject.name
-        };
-        out.push_str(&format!("- {} | {class} | {name}\n", subject.reference));
+        out.push_str(&format!(
+            "- {} | {class} | {}\n",
+            subject.reference, subject.name
+        ));
     }
     out
 }
@@ -282,12 +278,7 @@ pub fn state_key(cache_key: &str, check_key: &str, subjects: &[Subject]) -> Stri
 
 pub fn build(context: &Context, input: &ChunkInput, hits: &Hits) -> Option<Built> {
     let ontology = context.ontology;
-    let candidates: Vec<&Subject> = input
-        .known
-        .iter()
-        .take(context.max_subjects)
-        .chain(&input.doc)
-        .collect();
+    let candidates: Vec<&Subject> = input.known.iter().take(context.max_subjects).collect();
     let mut found: Vec<(&String, Vec<String>)> = Vec::new();
     for property in ontology.properties.values().filter(|p| p.is_attribute()) {
         if !property_hit(property, hits) {
@@ -375,8 +366,6 @@ pub mod tests {
         ex:Pump a owl:Class ; rdfs:subClassOf ex:Asset ; skos:prefLabel "Pump"@en .
         ex:Company a owl:Class ; skos:prefLabel "Company"@en .
         ex:Document a owl:Class ; skos:prefLabel "Document"@en .
-        ex:Sheet a owl:Class ; rdfs:subClassOf ex:Document ; skos:prefLabel "Data sheet"@en .
-        ex:Letter a owl:Class ; rdfs:subClassOf ex:Document ; skos:prefLabel "Letter"@en .
         ex:Pressure a qudt:QuantityKind ; qudt:hasDimensionVector qkdv:P .
         ex:Power a qudt:QuantityKind ; qudt:hasDimensionVector qkdv:W .
         ex:bar a qudt:Unit ; qudt:symbol "bar" ; qudt:conversionMultiplier 100000.0 ;
@@ -392,7 +381,7 @@ pub mod tests {
         ex:pressure a owl:DatatypeProperty ; rdfs:domain ex:Asset ;
             qudt:hasQuantityKind ex:Pressure ; skos:prefLabel "pressure"@en ;
             skos:altLabel "druk"@nl .
-        ex:power a owl:DatatypeProperty ; rdfs:domain ex:Asset, ex:Sheet ;
+        ex:power a owl:DatatypeProperty ; rdfs:domain ex:Asset, ex:Company ;
             qudt:hasQuantityKind ex:Power ; skos:prefLabel "power"@en .
         ex:stages a owl:DatatypeProperty ; rdfs:domain ex:Asset ;
             rdfs:range xsd:nonNegativeInteger ;
@@ -431,7 +420,7 @@ pub mod tests {
         }
     }
 
-    pub fn input(text: &str, known: Vec<Subject>, doc: Option<Subject>) -> ChunkInput {
+    pub fn input(text: &str, known: Vec<Subject>) -> ChunkInput {
         ChunkInput {
             id: 1,
             text: text.to_string(),
@@ -439,7 +428,6 @@ pub mod tests {
             path: "a/sheet.pdf".to_string(),
             pages: "1".to_string(),
             known,
-            doc,
         }
     }
 
@@ -509,29 +497,17 @@ pub mod tests {
         let onto = ontology();
         let pump = subject("r1", 10, "Pump", "P-101");
         let company = subject("r2", 11, "Company", "Acme");
-        let letter = subject(DOC, 12, "Letter", "");
-        let sheet = subject(DOC, 13, "Sheet", "");
-        assert!(built_for(&onto, &input("nothing here", vec![pump.clone()], None)).is_none());
-        assert!(
-            built_for(
-                &onto,
-                &input("rated 7,5 kW", vec![company.clone()], Some(letter.clone()))
-            )
-            .is_none()
-        );
-        let built = built_for(
-            &onto,
-            &input("rated 7,5 kW", vec![company.clone()], Some(sheet.clone())),
-        )
-        .unwrap();
+        let document = subject("r1", 12, "Document", "offer.pdf");
+        assert!(built_for(&onto, &input("nothing here", vec![pump.clone()])).is_none());
+        assert!(built_for(&onto, &input("rated 7,5 kW", vec![document])).is_none());
+        let built = built_for(&onto, &input("rated 7,5 kW", vec![company.clone()])).unwrap();
         assert_eq!(built.properties, [iri("power")]);
-        assert_eq!(built.subjects, std::slice::from_ref(&sheet));
+        assert_eq!(built.subjects, std::slice::from_ref(&company));
         let built = built_for(
             &onto,
             &input(
                 "P-101: 7,5 kW, 10 bar, 3 stages",
                 vec![pump.clone(), company],
-                Some(sheet),
             ),
         )
         .unwrap();
@@ -539,12 +515,13 @@ pub mod tests {
             built.properties,
             [iri("power"), iri("pressure"), iri("stages")]
         );
-        assert_eq!(built.refs[&iri("power")], ["r1", "doc"]);
+        assert_eq!(built.refs[&iri("power")], ["r1", "r2"]);
         assert_eq!(built.refs[&iri("pressure")], ["r1"]);
         let schema = built.request.schema.to_string();
-        assert!(schema.contains("\"enum\":[\"r1\",\"doc\"]"), "{schema}");
+        assert!(schema.contains("\"enum\":[\"r1\",\"r2\"]"), "{schema}");
         assert!(!schema.contains("material"));
         assert!(built.request.user.contains("| number | MW, kW, mW |"));
+        assert!(built.request.user.contains("- r2 | Company | Acme"));
     }
 
     #[test]
@@ -554,7 +531,6 @@ pub mod tests {
         let chunk = input(
             "P-101 and P-102: pressure 10 bar, 7,5 kW",
             vec![first.clone(), second],
-            None,
         );
         let all = built_for(&ontology(), &chunk).unwrap();
         assert_eq!(all.properties, [iri("power"), iri("pressure")]);
@@ -580,14 +556,14 @@ pub mod tests {
             crate::ontology::load_sources(&[("t.ttl".to_string(), text.into())], &config).ontology;
         assert!(onto.properties[&iri("colour")].is_attribute());
         let pump = subject("r1", 10, "Pump", "P-101");
-        let chunk = input("P-101 colour red", vec![pump], None);
+        let chunk = input("P-101 colour red", vec![pump]);
         assert!(built_for(&onto, &chunk).is_none());
     }
 
     #[test]
     fn a_new_unit_alias_changes_the_key_but_not_the_request() {
         let pump = subject("r1", 10, "Pump", "P-101");
-        let chunk = input("P-101 power 7,5 kWe", vec![pump], None);
+        let chunk = input("P-101 power 7,5 kWe", vec![pump]);
         let before = built_for(&ontology(), &chunk).unwrap();
         let config = OntologyConfig {
             files: Vec::new(),
@@ -608,11 +584,11 @@ pub mod tests {
     fn keys_follow_request_and_subject_ids() {
         let onto = ontology();
         let pump = subject("r1", 10, "Pump", "P-101");
-        let a = built_for(&onto, &input("P-101: 7,5 kW", vec![pump.clone()], None)).unwrap();
-        let b = built_for(&onto, &input("P-101: 7,5 kW", vec![pump.clone()], None)).unwrap();
+        let a = built_for(&onto, &input("P-101: 7,5 kW", vec![pump.clone()])).unwrap();
+        let b = built_for(&onto, &input("P-101: 7,5 kW", vec![pump.clone()])).unwrap();
         assert_eq!(a.key, b.key);
         let moved = subject("r1", 99, "Pump", "P-101");
-        let c = built_for(&onto, &input("P-101: 7,5 kW", vec![moved], None)).unwrap();
+        let c = built_for(&onto, &input("P-101: 7,5 kW", vec![moved])).unwrap();
         assert_eq!(a.cache_key, c.cache_key);
         assert_ne!(a.key, c.key);
         let other = format!(
@@ -627,7 +603,7 @@ pub mod tests {
         };
         let changed =
             crate::ontology::load_sources(&[("t.ttl".to_string(), other.into())], &config).ontology;
-        let d = built_for(&changed, &input("P-101: 7,5 kW", vec![pump], None)).unwrap();
+        let d = built_for(&changed, &input("P-101: 7,5 kW", vec![pump])).unwrap();
         assert_eq!(a.cache_key, d.cache_key);
     }
 }

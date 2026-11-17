@@ -131,6 +131,23 @@ async fn documents_get_reference_and_revision_links() {
         references.iter().any(|n| n.starts_with("Letter")),
         "{references:?}"
     );
+    let loose = env
+        .count(
+            "select count(*) from entities e where (e.document_id is null \
+             or e.key <> e.document_id::text) and exists (select 1 from mentions m \
+             where m.entity_id = e.id) and not exists (select 1 from relations r \
+             where r.src_id = e.id and r.property_iri = 'http://purl.org/dc/terms/isReferencedBy')",
+        )
+        .await;
+    assert_eq!(loose, 0);
+    let counted = env
+        .count(
+            "select count(*) from relations where property_iri = \
+             'http://purl.org/dc/terms/isReferencedBy' and (props->>'mentions')::int >= 1 \
+             and method = 'resolve:mentions'",
+        )
+        .await;
+    assert!(counted > 0);
     let again = resolve(&env).await;
     assert_eq!(again.written(), 0, "{again:?}");
     env.finish().await;

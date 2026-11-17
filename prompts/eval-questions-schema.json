@@ -1,0 +1,21 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["questions"],
+  "properties": {
+    "questions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["text", "language", "files", "quote"],
+        "properties": {
+          "text": {"type": "string"},
+          "language": {"type": "string"},
+          "files": {"type": "array", "items": {"type": "string"}},
+          "quote": {"type": "string"}
+        }
+      }
+    }
+  }
+}

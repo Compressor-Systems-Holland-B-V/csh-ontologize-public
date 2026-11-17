@@ -110,8 +110,12 @@ local only (`local:<name>`, see [embeddings.md](embeddings.md)).
 | `models.classify` | `"claude-code:haiku"` |
 | `models.attributes` | `"claude-code:sonnet"` |
 | `models.curate` | `"claude-code:sonnet"` |
+| `models.eval` | `"claude-code:opus"` |
 | `models.embed` | `"local:arctic-embed-m-v2.0"` |
 | `models.chars_per_token` | `2.0` |
+
+`models.eval` makes and judges the gold data (`eval draft`, `review sample --judge`); it should
+be stronger than the extract model, for example `claude-code:opus`.
 
 `models.chars_per_token` turns characters into tokens for the cost estimate until calls have been
 recorded.
@@ -125,7 +129,13 @@ logged-in account, e.g. `["~/.claude-a", "~/.claude-b"]` (log each in with
 `CLAUDE_CONFIG_DIR=~/.claude-a claude /login`). Each request runs with one of them as
 `CLAUDE_CONFIG_DIR`; an account that hits its usage limit or `max_window_use` is paused until its
 reset while the job goes on with the others, and the job waits only when every account is
-paused. `concurrency` applies per account. `models check` and `status` name each account. Empty
+paused. `account_window_use` (default `{}`) sets the cap per account, e.g.
+`{ "~/.claude-b" = 0.95 }`; the others use `max_window_use`. Claude Code no longer reports the
+window use with each reply, so before sending, and again every five minutes, each account's use is read
+from the OAuth usage endpoint that Claude Code's own `/usage` reads, with the token in the
+account's `.credentials.json`. An account without that file (the token kept elsewhere) is not read. When a reading fails (the endpoint rate-limits), the last reading of the current window is kept; without one, an account with a cap below 1 pauses until
+a reading works again; at 1 it sends until it is rejected. An account that reports paid extra
+usage (`isUsingOverage`) is paused until its reset. `concurrency` applies per account. `models check` and `status` name each account. Empty
 means the current `CLAUDE_CONFIG_DIR`, or Claude Code's default when unset. Switching between
 personal Max accounts to get past usage limits may break Anthropic's consumer terms; check
 before relying on it.
@@ -179,8 +189,12 @@ The defaults work for most data. Commonly changed:
 | `llm_extract.min_chars` | `200` | Shortest chunk sent |
 | `llm_extract.confidence` | `0.7` | Confidence of model facts |
 | `llm_extract.max_per_document` | `3` | Most chunks per document in a sample |
-| `llm_extract.min_letter_share` / `embed.min_letter_share` | `0.5` | Chunks with fewer letters are skipped |
-| `llm_extract.min_ocr_confidence` / `embed.min_ocr_confidence` | `0.6` | Chunks on OCR pages below this are skipped |
+| `llm_extract.min_letter_share` / `embed.min_letter_share` | `0.5` | Chunks with fewer letters are skipped, by every `extract` and `attributes` run (not only `--sample`); so is a chunk whose text repeats an earlier chunk. The reports count both |
+| `llm_extract.min_ocr_confidence` / `embed.min_ocr_confidence` | `0.6` | Chunks on OCR pages below this are skipped, as above |
+| `llm_extract.skip_paths` | `[]` | Globs of old copies (`**/*_old.*`): read, chunked and searchable, but never sent by `extract` or `attributes`; counted in the reports |
+| `llm_extract.repeated_line_files` | `10` | A line (with letters) found in more files than this is left out of the text sent to `extract` (0: off); the stored chunk is unchanged |
+| `llm_extract.quote_headers` | `[]` | Regexes for the header of a quoted mail; the text from the first match on is not sent when most of its lines are also in another file |
+| `llm_extract.min_tag_words` | `2` | A model entity named by a bare tag (digits, no word of 3 letters) is kept only when its line has its class name or this many other words; otherwise it becomes a mention of the document |
 | `llm_extract.resend_share` | `0.2` | Share of chunks sent again without `--yes` |
 | `llm_extract.out` | `"extract"` | Report folder |
 | `llm_extract.max_known` | `0` | Most known entities offered per chunk as `rN` (0: `llm_extract.max_shortlist`), in this order: rule hits in the chunk, rule hits on its document (project, customer, site from the path), things one rule relation away from those, rule hits in the other chunks of the content; each cluster once, as its canonical row. Model output never feeds this list |
@@ -195,6 +209,7 @@ The defaults work for most data. Commonly changed:
 | `attributes.seed` | `""` | Sample seed (empty: `llm_extract.seed`) |
 | `attributes.resend_share` | unset | Share of chunks sent again without `--yes` (unset: `llm_extract.resend_share`) |
 | `attributes.threads` | `0` | Threads that build requests (0: `scan.hash_threads`) |
+| `attributes.min_line_words` | `2` | Only lines with this many words (2 or more letters) count when a chunk is looked at for a property name or unit |
 | `attributes.unit_symbols` | `12` | Unit symbols listed per quantity kind in the prompt |
 | `classify.head_chars` | `1500` | Text sent per part |
 | `classify.min_chars` | `50` | Parts with less text are not sent |
@@ -206,10 +221,29 @@ The defaults work for most data. Commonly changed:
 | `curate.definition_chars` | `200` | Longest class definition in the curate prompt |
 | `curate.out` | `"curate"` | Report folder |
 | `curate.not_in_class` | `{}` | Class name (prefixed or `<IRI>`) to a list of regex patterns a name of that class (or a subclass) cannot match; a hit sends the entity to curate, for example legal forms under a site or person class |
+| `curate.folder_classes` | `[]` | Classes (e.g. a project class) whose model-made entities are sent to curate together with the rule-made entity of that class that the documents mentioning them belong to, so curate joins aliases to it, picks another class or drops them. Curate never renames, reclasses or drops that rule-made entity |
+| `curate.gazetteer` | `""` | Generated gazetteer (CSV, same columns as `gazetteer/*.csv`) written after `curate` and read by the rules of the next run; empty: none |
+| `curate.gazetteer_documents` | `3` | Documents a model-made cluster must be named in before it enters the generated gazetteer |
+| `curate.gazetteer_classes` | `[]` | Classes the generated gazetteer takes |
 | `fit.definition_chars` / `llm_extract.definition_chars` / `classify.definition_chars` | `200` | Longest class definition in a prompt |
 | `review.sample` | `50` | Facts shown by `review sample` |
 | `review.min_verdicts` | `30` | Reviews of a class or property before they set its confidence (0: never) |
-| `eval.world` | `""` | World list (`name,variant,class`) for `eval entities`, relative to the config dir; empty: `eval entities` stops |
+| `review.checked` | `0.8` | Confidence from which a model fact is in the `checked` tier of the API views; below it is a `proposal` |
+| `run.summary` | `"summary.md"` | Where `zontologize run` writes its summary (Markdown, plus a `.json` beside it with the numbers of the last finished run, for the change column) |
+| `run.set` | `""` | Gold set (`eval draft --set`) that `run` scores against; with it, `run` also runs the judge (`review sample --judge`); empty: the run ends without numbers |
+| `run.targets` | `{ found = 0.9, duplicates = 0.05, class_accuracy = 0.9, mentions = 0.9, relations = 0.9, attributes = 0.85, catch_rate = 0.9 }` | Targets for the verdicts in the run summary: good when met, fair within 10 points, poor beyond |
+| `eval.dir` | `"eval"` | Folder of the gold sets of `eval draft` (`<dir>/<set>/v<n>/`) and of `judge-report.md`, relative to the config dir |
+| `eval.summary` | `""` | Results summary that `eval entities` and `review sample --judge` write their section into; empty: not written |
+| `eval.seed` | `"eval"` | Seed of the gold samples and of the judge's draw |
+| `eval.docs_per_kind` | `3` | Documents per document kind and first-level folder in each of the two world samples |
+| `eval.min_doc_chars` / `max_doc_chars` | `200` / `6000` | Documents with less text are left out; text sent per document |
+| `eval.request_chars` | `60000` | Most document text per gold request |
+| `eval.questions` | `25` | Questions per set made by `eval draft --what questions` |
+| `eval.attribute_chunks` | `300` | Chunks labelled by `eval draft --what attributes` |
+| `eval.judge_batch` / `judge_context` | `10` / `600` | Claims per judge request; characters of text around a fact |
+| `eval.judge_mentions` / `judge_relations` / `judge_attributes` | `100` / `100` / `100` | Facts per kind the judge marks in `review sample --judge` |
+| `eval.planted` | `20` | Planted wrong facts per kind mixed into the judge's sample |
+| `eval.min_catch_rate` | `0.9` | Share of planted errors the judge must catch, or its report is marked failed |
 | `embed.threads` / `batch_size` | `0` / `8` | Embedding throughput |
 | `embed.min_chars` | `50` | Shorter chunks are skipped |
 | `embed.max_tokens` | `512` | Longest input in tokens for a model that sets no `max_tokens` |
@@ -220,6 +254,7 @@ The defaults work for most data. Commonly changed:
 | `embed.progress_secs` | `30` | Seconds between progress lines |
 | `resolve.strip_words` | `[]` | Whole words ignored when names are compared and in the keys of extracted entities, such as legal forms; after a change the next `extract` re-keys extracted entities and folds rows that end on one key |
 | `resolve.fuzzy_score` / `embed_score` | `0.92` / `0.9` | Match thresholds |
+| `resolve.fuzzy_auto` | `1.01` (off) | Fuzzy score from which a match between two names of the same class is `auto` instead of `proposed`, for example 0.97 for OCR and typing variants |
 | `resolve.classes` | `[]` | Limit to these classes |
 | `resolve.max_candidates` | `5` | Nearest neighbours compared per entity |
 | `resolve.block_chars` / `max_block` | `4` / `1000` | Token prefix that groups candidates (every token of 3+ characters, and the acronym of a name); groups larger than `max_block` (common words) are not compared |
@@ -257,14 +292,52 @@ the same test. A class that sits under two disjoint classes is an error in `onto
 
 ### Entity quality
 
-`zontologize eval entities` compares the entities with the world list in `eval.world`: a CSV
-with `name,variant,class`, one row per spelling of a known thing (the name is also a variant of
-itself). An entity matches a name when its name, key or an alias equals a variant, ignoring case
-and extra spaces. Per class it prints `world` (names in the list), `found` (names with a match),
-`dup rate` (found names whose matches are in more than one cluster, over found), `extra`
-(clusters beyond the first per found name), `wrong merges` (clusters holding two or more names)
-and `class acc` (matches whose class is the listed class or a subclass of it). A cluster is the
-`canonical_id` of `resolve`; before `resolve` every entity is its own cluster.
+`zontologize eval entities --set <name>` compares the entities with the world list of the newest
+frozen version of a gold set (`--world <file>` takes any list instead, such as the test data's
+`data/tests/world.csv`): a CSV with `name,variant,class`, one row per spelling of a known thing
+(more columns are ignored). An entity matches a name when its name, key or an alias equals a
+variant, ignoring case and extra spaces. Per class it prints `world` (names in the list), `found`
+(names with a match) and its share, `dup rate` (found names whose matches are in more than one
+cluster, over found), `extra` (clusters beyond the first per found name), `wrong merges`
+(clusters holding two or more names) and `class acc` (matches whose class is the listed class or
+a subclass of it). A cluster is the `canonical_id` of `resolve`; before `resolve` every entity is
+its own cluster. With `eval.summary` set, the table also goes into that file's *Gold list*
+section.
+
+### Gold data
+
+`zontologize eval draft --set <name> --what world|questions|attributes [--folders a,b]` makes
+gold data from the raw text of the documents with `models.eval`, never from the entities. It
+writes `<eval.dir>/<name>/v<n>/`: the gold file, `documents.csv` and `report.md`. A version
+belongs to one set of documents (a hash of their paths and contents); while the documents stay
+the same, a gold file once written is frozen and the command does nothing. Each item carries a
+file and a quote; an item whose quote is not in that file's text (ignoring case and spaces) is
+dropped.
+
+- `world`: per first-level folder two samples of documents, `docs_per_kind` per document kind.
+  The model lists the important things and every spelling; a second call per sample joins
+  spellings of one thing. Things found in both samples are gold; the rest is sent to a judging
+  call and kept only when it confirms them. `world.csv` has `name,variant,class,file,quote`.
+- `questions`: about `eval.questions` questions in the ontology's languages, each with the files
+  that answer it, kept only when the model answers it from those files alone. `questions.toml` is
+  read by `eval embed --questions <file>`.
+- `attributes`: a stratified sample of `attribute_chunks` chunks, labelled twice (the second time
+  in reverse order) with equipment, property, value, unit and quote; values in one pass only go
+  to the judge. Writes `attributes.csv` and the sample in `chunks.csv`.
+
+`report.md` gives the counts, the grounding drops and the agreement rate of the two runs.
+
+### Judged review
+
+`zontologize review sample --judge` lets `models.eval` mark a stratified sample of facts (per
+method and class or property; `judge_mentions`, `judge_relations`, `judge_attributes`) right or
+wrong from the text around them, mixed with `planted` wrong facts per kind: swapped ends of a
+relation, another class, a changed number or unit, a name from another chunk. Facts with a human
+verdict are judged first, so the two can be compared. Verdicts go to `fact_reviews` with
+`reviewer = 'judge'`; planted ones have `planted = true` and never count as precision. A rerun
+only tops up to the configured numbers. The report (`<eval.dir>/judge-report.md`, and the
+*Judged precision* section of `eval.summary`) gives precision per kind with its 95% margin and the
+share of planted errors caught; under `min_catch_rate` it is marked failed.
 
 ## Units and attribute properties
 
@@ -281,7 +354,11 @@ A datatype property becomes an attribute when its domain is selected and its ran
 its quantity kind; a unit fits when it has the same dimension vector and, when any unit of
 that dimension lists the kind with `qudt:hasQuantityKind`, also lists it (or lists no kind).
 A property's domain and range may be an `owl:unionOf` of classes. A property without a domain
-(or an object property without a range) fits no class and is not extracted:
+(or an object property without a range) fits no class and is not extracted. A class fits a
+domain or range when it is the bound, a subclass of it, or (on that subclass chain) directly
+typed as the bound, so a meta-class such as CFIHOS's equipment class works as a domain; a class
+typed as an instance of another class does not inherit that class's domains. Values go only to
+the things the chunk mentions, never to the document itself:
 
 ```turtle
 ex:dischargePressure a owl:DatatypeProperty ;
@@ -346,14 +423,28 @@ class = "acme:Project"
 pattern = '(?i)^(?:P-?)?(?P<n>\d{4}-\d{4})(?:\s|$)'
 key = "P-{n}"
 
+[[number_keys]]              # a second number shape: its own key, never merged with P-{n}
+class = "acme:Project"
+pattern = '(?i)^SP-?(?P<n>\d{4}-\d{4})(?:-[a-z0-9]+)*(?:\s|$)'
+key = "SP-{n}"
+link = { property = "acme:sparesOf", key = "P-{n}" }  # resolve: a relation to the entity of this key, from the same digits
+
 [persons]                    # people from mail headers, e-mail addresses and signatures
 class = "acme:Person"
 sent_by = "acme:sentBy"
 sent_to = "acme:sentTo"
 works_for = "acme:worksFor"  # from the address's domain, when a gazetteer alias is that domain
 closings = ["kind regards", "met vriendelijke groet"]
-role_addresses = ["info", "sales"]
+role_addresses = ["info", "sales"]  # a local part that is, or starts with, one of these words is no person
 ```
+
+A mail address becomes a person only with a name: from the display name, the text before
+`<address>`, or a local part that splits into a name (`jan.devries`). Message-ID, References and
+In-Reply-To lines, hex IDs, role addresses and an address used with two different names in one
+text give no person. `resolve` pairs people of one organisation or mail domain whose names differ
+only in initials or particles (`R. v.d. Sar`, `r vandersar`, `Ruud van der Sar`) with rule
+`initials`: `auto` when one of them is keyed by a mail address or is in the gazetteer (and not both
+by an address), else `proposed`. A first name alone never pairs.
 
 A path rule entity can carry `props` from the path, for example
 `{ id = "p", class = "acme:Project", key = "{project}", props = { year = "{year}" } }`;
@@ -386,7 +477,8 @@ inside the run (`<< <`), so the text cannot close the delimiters.
 
 ## questions.toml
 
-Optional test questions for `eval embed`:
+Optional test questions for `eval embed` (`eval embed --questions <file>` reads another file, such
+as the `questions.toml` of an `eval draft` set):
 
 ```toml
 [[questions]]

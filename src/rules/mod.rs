@@ -6,7 +6,7 @@ pub mod path;
 pub mod persons;
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
@@ -15,7 +15,7 @@ use sha2::{Digest, Sha256};
 use crate::hash::hex;
 use crate::ontology::Ontology;
 
-pub const STAGE_VERSION: u32 = 5;
+pub const STAGE_VERSION: u32 = 7;
 const DEFAULT_RULES: &str = include_str!("../../defaults/rules.toml");
 const RULES_FILE: &str = "rules.toml";
 const GAZETTEER_DIR: &str = "gazetteer";
@@ -230,6 +230,10 @@ fn read(config_dir: Option<&Path>, ontology: &Ontology) -> Result<Sources> {
         }
     }
     gazetteer_files.sort();
+    let generated = crate::config::load(config_dir)?.curate.gazetteer;
+    if !generated.is_empty() && Path::new(&generated).is_file() {
+        gazetteer_files.push(PathBuf::from(generated));
+    }
     let mut gazetteer_sources = Vec::new();
     for path in gazetteer_files {
         let bytes =
@@ -563,6 +567,35 @@ pub(crate) mod tests {
         );
         assert!(!loaded.has_errors(), "{:?}", loaded.findings);
         loaded.ontology
+    }
+
+    #[test]
+    fn the_generated_gazetteer_changes_the_rules_key() {
+        let path =
+            std::env::temp_dir().join(format!("zontologize-generated-{}", std::process::id()));
+        std::fs::create_dir_all(&path).unwrap();
+        let dir = &path;
+        let generated = dir.join("generated.csv");
+        std::fs::write(
+            dir.join("zontologize.toml"),
+            format!("[curate]\ngazetteer = \"{}\"\n", generated.display()),
+        )
+        .unwrap();
+        let ontology = ontology();
+        let before = key(Some(dir), &ontology).unwrap();
+        std::fs::write(
+            &generated,
+            "class,key,name,aliases,lang\nex:Project,P-1,P-1 Harbour,Blue Whale,\n",
+        )
+        .unwrap();
+        let after = key(Some(dir), &ontology).unwrap();
+        assert_ne!(before, after);
+        let read = read(Some(dir), &ontology).unwrap();
+        assert!(
+            read.gazetteer
+                .iter()
+                .any(|(name, _)| name.ends_with("generated.csv"))
+        );
     }
 
     pub fn rules(text: &str) -> Result<Rules> {

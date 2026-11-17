@@ -17,6 +17,7 @@ const LISTED: usize = 200;
 pub struct Totals {
     pub header: String,
     pub links: Vec<(String, i64)>,
+    pub open: Vec<(String, i64)>,
     pub rows: Vec<OverrideRow>,
     pub skipped: usize,
     pub sources: Vec<(String, usize)>,
@@ -53,6 +54,13 @@ pub fn markdown(totals: &Totals) -> String {
     out.push_str("\n## Same-as links written\n\n| Status | Links |\n|---|---|\n");
     for (status, count) in &totals.links {
         let _ = writeln!(out, "| {status} | {count} |");
+    }
+    out.push_str(
+        "\n## Still open\n\nNot decided within this run; hidden from the graph and the assistant \
+         (tier `proposal`). Nothing waits for a person.\n\n| Kind | Open |\n|---|---|\n",
+    );
+    for (kind, count) in &totals.open {
+        let _ = writeln!(out, "| {kind} | {count} |");
     }
     let mut classes = Vec::new();
     let mut names = Vec::new();
@@ -131,6 +139,7 @@ pub async fn write_report(
     let totals = Totals {
         header: header(pool, job).await?,
         links: db::curate::link_counts(pool).await?,
+        open: db::curate::open_counts(pool).await?,
         rows: db::curate::overrides(pool).await?,
         skipped,
         sources: sources.iter().map(|(s, n)| (s.to_string(), *n)).collect(),
@@ -172,6 +181,7 @@ mod tests {
         let totals = Totals {
             header: "Job 3: 2 calls, 0.0000 USD.".to_string(),
             links: vec![("auto".to_string(), 1)],
+            open: vec![("same as: resolve:tokens".to_string(), 7)],
             rows: vec![
                 row(
                     "Zuidwal Technick",
@@ -191,6 +201,7 @@ mod tests {
         assert!(text.contains("not sent: 4."), "{text}");
         assert!(text.contains("| name pattern | 2 |"), "{text}");
         assert!(text.contains("| auto | 1 |"), "{text}");
+        assert!(text.contains("| same as: resolve:tokens | 7 |"), "{text}");
         assert!(text.contains("## Class changes (1)"), "{text}");
         assert!(text.contains("| Acme | Site | Customer | auto |"), "{text}");
         assert!(

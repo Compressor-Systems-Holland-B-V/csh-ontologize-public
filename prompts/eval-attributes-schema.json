@@ -1,0 +1,23 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["values"],
+  "properties": {
+    "values": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["chunk", "equipment", "property", "value", "unit", "quote"],
+        "properties": {
+          "chunk": {"type": "string"},
+          "equipment": {"type": "string"},
+          "property": {"type": "string"},
+          "value": {"type": "string"},
+          "unit": {"type": "string"},
+          "quote": {"type": "string"}
+        }
+      }
+    }
+  }
+}

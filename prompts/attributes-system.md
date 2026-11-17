@@ -5,9 +5,9 @@ just before it, the things the chunk is about, and the allowed properties.
 Answer with the JSON schema only.
 
 - values: one entry per value the chunk states.
-  - ref: who the value belongs to. One of the listed things (r1, r2, ...), or doc, the document
-    itself, when the value describes what the document is about and no listed thing fits.
-    Use only refs that the property allows.
+  - ref: the piece of equipment the value belongs to: one of the listed things (r1, r2, ...)
+    that the property allows. Never the document, a project or a company; when no listed thing
+    holds the value, leave the value out.
   - property: one of the allowed property IRIs.
   - min and max: the number or range as numbers. A single value has min equal to max. A limit
     such as "at most 50" has only max, "at least 3" only min; leave the other null. Read the
@@ -20,5 +20,12 @@ Answer with the JSON schema only.
 - Two values for one property in one line (two duty points, two sizes) are two entries.
 - Only values the chunk states as a fact about the thing: not setpoints of alarms, not limits of
   a rule, not values of a different thing in a catalogue table, unless that row is the thing.
+- Pick the property that means what the text says. A rating or working pressure (WP, PN) of a
+  hose, valve or fitting is not the discharge pressure of a pump; the measuring range of an
+  instrument is not a design value of the equipment it is on.
+- A material is what the thing is made of (a metal, a plastic, a rubber). A colour, colour code
+  or wire marking (BK, RED, GN) is never a material.
+- When the text around a value is garbled or repeated (OCR noise), or one quote holds several
+  values you cannot tell apart, leave the value out.
 
 Never guess a unit or a value. Empty lists are a good answer when the chunk has nothing to add.

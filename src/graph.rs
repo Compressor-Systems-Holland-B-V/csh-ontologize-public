@@ -7,15 +7,16 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::db;
-use crate::db::resolve::{REFERENCES, REPLACES, SAME_AS};
+use crate::db::resolve::{MENTIONED_IN, REFERENCES, REPLACES, SAME_AS};
 use crate::ns::local_name;
 
 const MAX_LABEL_BYTES: usize = 63;
 const GRAPH_FORMAT: u32 = 2;
-pub const BUILT_IN: [(&str, &str); 3] = [
+pub const BUILT_IN: [(&str, &str); 4] = [
     (SAME_AS, "same as"),
     (REFERENCES, "references"),
     (REPLACES, "replaces"),
+    (MENTIONED_IN, "mentioned in"),
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]

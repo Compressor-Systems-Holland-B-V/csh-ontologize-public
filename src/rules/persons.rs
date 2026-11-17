@@ -14,6 +14,7 @@ pub const SIGNATURE_METHOD: &str = "signature";
 const MAX_NAME_WORDS: usize = 5;
 const MAX_NAME_CHARS: usize = 60;
 const SIGNATURE_LOOKAHEAD: usize = 3;
+const MIN_ID_CHARS: usize = 12;
 const LEGAL_FORMS: [&str; 30] = [
     "bv",
     "nv",
@@ -96,6 +97,9 @@ static SUBJECT: LazyLock<Regex> = LazyLock::new(|| {
 });
 static ADDRESS: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"[A-Za-z0-9._%+'-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}").unwrap()
+});
+static ID_HEADER: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)^[ \t>]*\**(message-id|references|in-reply-to)\**[ \t]*:").unwrap()
 });
 static EXCHANGE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)/O=([^/]+)/.*?/CN=([^/<>]+?)\s*>?\s*$").unwrap());
@@ -223,6 +227,10 @@ impl Persons {
             if !body.trim().is_empty() && !SUBJECT.is_match(body) && !HEADER.is_match(body) {
                 in_top = false;
             }
+            if ID_HEADER.is_match(body) {
+                taken.push((starts[n], starts[n] + body.len()));
+                continue;
+            }
             if let Some(captures) = HEADER.captures(body) {
                 let field = captures[1].to_lowercase();
                 let value = captures.get(2).map_or(0..0, |m| m.range());
@@ -255,7 +263,8 @@ impl Persons {
             if taken.iter().any(|&(s, e)| m.start() >= s && m.end() <= e) {
                 continue;
             }
-            let Some(person) = self.person_at(m.as_str(), None) else {
+            let display = display_before(&text[..m.start()]);
+            let Some(person) = self.person_at(m.as_str(), display) else {
                 continue;
             };
             self.push(
@@ -266,7 +275,7 @@ impl Persons {
                 0.9,
             );
         }
-        found
+        drop_shared(found)
     }
 
     pub fn works_for_key(&self, key: &str) -> Option<Org> {
@@ -375,18 +384,108 @@ impl Persons {
     fn person_at(&self, address: &str, name: Option<String>) -> Option<Person> {
         let address = address.trim_matches(['\'', '.']).to_lowercase();
         let (local, domain) = address.rsplit_once('@')?;
-        if self.role_addresses.iter().any(|r| r == local) {
+        if self.is_role(local) || is_message_id(local) {
             return None;
         }
-        let name = name
-            .or_else(|| name_from_local(local))
-            .unwrap_or_else(|| address.clone());
+        let name = name.map(|n| in_address_order(&n, local));
+        let name = name.or_else(|| name_from_local(local))?;
         Some(Person {
             org: self.domains.get(domain).cloned(),
             key: address,
             name,
         })
     }
+
+    fn is_role(&self, local: &str) -> bool {
+        let head: String = local
+            .chars()
+            .take_while(char::is_ascii_alphabetic)
+            .collect();
+        self.role_addresses.iter().any(|r| r == local || *r == head)
+    }
+}
+
+/// "Merrin Gordon <gordon.merrin@...>": a display name that is the address's first.last turned
+/// around takes the address's order.
+fn in_address_order(name: &str, local: &str) -> String {
+    let words: Vec<&str> = name.split_whitespace().collect();
+    match (words.as_slice(), local.split_once('.')) {
+        ([a, b], Some((first, last)))
+            if a.eq_ignore_ascii_case(last) && b.eq_ignore_ascii_case(first) =>
+        {
+            format!("{b} {a}")
+        }
+        _ => name.to_string(),
+    }
+}
+
+fn is_message_id(local: &str) -> bool {
+    local.len() >= MIN_ID_CHARS
+        && local.chars().any(|c| c.is_ascii_digit())
+        && local
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() || matches!(c, '.' | '-' | '$' | '_'))
+}
+
+fn display_before(before: &str) -> Option<String> {
+    let line = before.rsplit('\n').next().unwrap_or(before);
+    let line = line.trim_end_matches([' ', '\\']).strip_suffix('<')?;
+    let line = line.trim_end_matches([' ', '\\']);
+    let start = line
+        .rfind([':', ';', '(', '\t', '>', '|'])
+        .map_or(0, |i| i + 1);
+    let display = line[start..].trim();
+    let display = match display.strip_suffix('"') {
+        Some(inner) => inner.rsplit('"').next().unwrap_or(inner),
+        None => display,
+    };
+    let display = display.trim().trim_matches(['"', '\'', ' ', '*']);
+    person_name(&turn_around(display))
+}
+
+fn drop_shared(found: Found) -> Found {
+    let mut names: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for entity in found.entities.iter().filter(|e| e.key.contains('@')) {
+        names.entry(&entity.key).or_default().push(&entity.name);
+    }
+    let shared: Vec<String> = names
+        .into_iter()
+        .filter(|(_, names)| {
+            let parsed: Vec<_> = names
+                .iter()
+                .filter_map(|n| crate::resolve::names::person_name(&name_key(n)))
+                .collect();
+            parsed
+                .iter()
+                .any(|p| !crate::resolve::names::same_person(&parsed[0], p))
+        })
+        .map(|(key, _)| key.to_string())
+        .collect();
+    if shared.is_empty() {
+        return found;
+    }
+    let mut index = HashMap::new();
+    let mut kept = Found::default();
+    for (i, entity) in found.entities.into_iter().enumerate() {
+        if !shared.contains(&entity.key) {
+            index.insert(i, kept.entities.len());
+            kept.entities.push(entity);
+        }
+    }
+    let end = |e: TextEnd| match e {
+        TextEnd::Entity(i) => index.get(&i).map(|&j| TextEnd::Entity(j)),
+        other => Some(other),
+    };
+    for relation in found.relations {
+        if let (Some(from), Some(to)) = (end(relation.from), end(relation.to)) {
+            kept.relations.push(TextRelation {
+                from,
+                property: relation.property,
+                to,
+            });
+        }
+    }
+    kept
 }
 
 fn starts_with_headers(text: &str) -> bool {
@@ -554,6 +653,26 @@ fn title_case(text: &str) -> String {
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_turned_display_name_takes_the_address_order() {
+        assert_eq!(
+            in_address_order("Merrin Gordon", "gordon.merrin"),
+            "Gordon Merrin"
+        );
+        assert_eq!(
+            in_address_order("Gordon Merrin", "gordon.merrin"),
+            "Gordon Merrin"
+        );
+        assert_eq!(
+            in_address_order("Jan de Vries", "jan.devries"),
+            "Jan de Vries"
+        );
+        assert_eq!(
+            in_address_order("Merrin Gordon", "gmerrin"),
+            "Merrin Gordon"
+        );
+    }
+
     const OWN: &str = "urn:test#OwnCompany";
     const PERSON: &str = "urn:test#Person";
 
@@ -693,14 +812,76 @@ mod tests {
     }
 
     #[test]
-    fn addresses_in_text_skip_role_addresses() {
-        let text = "Mail sales@acme.example or piet.jansen@acme.example, not x@y.example.";
+    fn addresses_in_text_skip_role_addresses_and_addresses_without_a_name() {
+        let text = "Mail sales@acme.example, sales.nl@acme.example or piet.jansen@acme.example, not x@y.example.";
+        let found = persons().find(text);
+        assert_eq!(
+            people(&found),
+            [("piet.jansen@acme.example", "Piet Jansen", "address")]
+        );
+    }
+
+    #[test]
+    fn message_ids_and_content_ids_give_no_person() {
+        let text = "**Message-ID**: <ab12cd34ef.5678@mail.example>\n\
+            References: <jan.devries@acme.example>\n\
+            In-Reply-To: <mia.berg@northwind.example>\n\
+            See <0a1b2c3d4e5f6a7b8c9d@mx.example> and cid:image001.png@01d2a3b4.example\n";
+        assert!(persons().find(text).entities.is_empty());
+    }
+
+    #[test]
+    fn a_name_before_an_address_in_the_text_names_the_person() {
+        let text = "Please contact: Eva van Dijk <e.vdijk@acme.example> or \"Hale, Tom\" \\<th@northwind.example\\>\n";
         let found = persons().find(text);
         assert_eq!(
             people(&found),
             [
-                ("piet.jansen@acme.example", "Piet Jansen", "address"),
-                ("x@y.example", "x@y.example", "address"),
+                ("e.vdijk@acme.example", "Eva van Dijk", "address"),
+                ("th@northwind.example", "Tom Hale", "address"),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_bare_address_in_a_header_gives_no_person() {
+        let text = "**Subject**: x\n**From**: Jan de Vries <jan.devries@acme.example>\n**To**: tom@northwind.example\n";
+        let found = persons().find(text);
+        assert_eq!(
+            people(&found),
+            [("jan.devries@acme.example", "Jan de Vries", "mail")]
+        );
+    }
+
+    #[test]
+    fn an_address_with_several_people_behind_it_is_no_person() {
+        let text = "**Subject**: x\n**From**: Jan de Vries <orders@northwind.example>\n\
+            **To**: Mia Berg <mia.berg@acme.example>\n\nThanks.\n\n> From: Tom Hale <orders@northwind.example>\n\
+            > To: Vries, Jan <jan.devries@acme.example>\n> Cc: J. de Vries <jan.devries@acme.example>\n";
+        let found = persons().find(text);
+        assert_eq!(
+            people(&found),
+            [
+                ("mia.berg@acme.example", "Mia Berg", "mail"),
+                ("jan.devries@acme.example", "Jan Vries", "mail"),
+                ("jan.devries@acme.example", "J. de Vries", "mail"),
+            ]
+        );
+        assert_eq!(
+            relations(&found),
+            [
+                (
+                    "document".to_string(),
+                    "sentTo>mia.berg@acme.example".to_string()
+                ),
+                (
+                    "jan.devries@acme.example".to_string(),
+                    "worksFor>acme".to_string()
+                ),
+                (
+                    "mia.berg@acme.example".to_string(),
+                    "worksFor>acme".to_string()
+                ),
             ]
         );
     }

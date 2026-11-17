@@ -19,6 +19,7 @@ attributes.span_end
 attributes.method
 attributes.confidence
 attributes.superseded
+attributes.tier
 canonical_entities.id
 canonical_entities.class_iri
 canonical_entities.key
@@ -28,6 +29,7 @@ canonical_entities.dataset
 canonical_entities.document_id
 canonical_entities.members
 canonical_entities.aliases
+canonical_entities.tier
 canonical_relations.id
 canonical_relations.src_id
 canonical_relations.property_iri
@@ -41,6 +43,7 @@ canonical_relations.chunk_id
 canonical_relations.span_start
 canonical_relations.span_end
 canonical_relations.support
+canonical_relations.tier
 chunks.id
 chunks.content_id
 chunks.ord
@@ -121,6 +124,7 @@ entities.method
 entities.confidence
 entities.document_id
 entities.canonical_id
+entities.tier
 entity_classes.entity_id
 entity_classes.class_iri
 entity_classes.name
@@ -177,6 +181,7 @@ relations.document_id
 relations.chunk_id
 relations.span_start
 relations.span_end
+relations.tier
 sources.id
 sources.name
 sources.kind

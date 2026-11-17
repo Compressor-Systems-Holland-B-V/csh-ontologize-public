@@ -93,6 +93,34 @@ fn slice(text: &str, start: usize, end: usize) -> String {
     text.chars().skip(start).take(end - start).collect()
 }
 
+fn quote_lines(text: &str, start: usize, end: usize) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let from = chars[..start.min(chars.len())]
+        .iter()
+        .rposition(|c| *c == '\n')
+        .map_or(0, |i| i + 1);
+    let to = chars[end.min(chars.len())..]
+        .iter()
+        .position(|c| *c == '\n')
+        .map_or(chars.len(), |i| end + i);
+    chars[from..to].iter().collect()
+}
+
+fn unit_place(text: &str, context: &str, start: usize, end: usize) -> String {
+    let lines = quote_lines(text, start, end);
+    if !lines.trim_start().starts_with('|') {
+        return lines;
+    }
+    let before: String = text.chars().take(start).collect();
+    let header = before
+        .lines()
+        .rev()
+        .take_while(|l| l.trim_start().starts_with('|'))
+        .last()
+        .unwrap_or("");
+    format!("{lines}\n{header}\n{context}")
+}
+
 fn has_unit(haystack: &str, unit: &str) -> bool {
     let haystack = nfkc_squash(haystack).to_lowercase();
     let unit = nfkc_squash(unit).to_lowercase();
@@ -214,7 +242,7 @@ pub fn check(
                         checked.drop(Reason::NoUnit, iri);
                         continue;
                     }
-                    if !has_unit(text, unit_text) && !has_unit(context, unit_text) {
+                    if !has_unit(&unit_place(text, context, start, end), unit_text) {
                         checked.drop(Reason::UnitNotInText, iri);
                         continue;
                     }
@@ -324,8 +352,8 @@ mod tests {
     fn run(chunk: &str, context: &str, values: Vec<serde_json::Value>) -> Checked {
         let onto = ontology();
         let pump = subject("r1", 10, "Pump", "P-101");
-        let sheet = subject("doc", 13, "Sheet", "");
-        let mut chunk_input = input(chunk, vec![pump], Some(sheet));
+        let company = subject("r2", 13, "Company", "Acme");
+        let mut chunk_input = input(chunk, vec![pump, company]);
         chunk_input.context = context.to_string();
         let built = built_for(&onto, &chunk_input).expect("eligible");
         let units = UnitIndex::new(&onto);
@@ -365,7 +393,7 @@ mod tests {
                     "",
                     "rated power 7,5 kW",
                 ),
-                value("doc", "power", Some(7.5), Some(7.5), "kW", "", "7,5 kW"),
+                value("r2", "power", Some(7.5), Some(7.5), "kW", "", "7,5 kW"),
                 value(
                     "r1",
                     "pressure",
@@ -405,6 +433,25 @@ mod tests {
         assert_eq!(material.low, None);
         assert_eq!(checked.values[4].si_low, Some(3.0));
         assert_eq!(checked.values[4].dimension, None);
+    }
+
+    #[test]
+    fn a_unit_elsewhere_in_the_chunk_is_not_enough() {
+        let checked = run(
+            "Motor rated 7,5 kW.\nPump P-101 delivers 250 at the outlet.",
+            "",
+            vec![value(
+                "r1",
+                "power",
+                Some(250.0),
+                Some(250.0),
+                "kW",
+                "",
+                "delivers 250",
+            )],
+        );
+        assert_eq!(checked.values.len(), 0);
+        assert_eq!(reasons(&checked), [Reason::UnitNotInText.as_str()]);
     }
 
     #[test]
@@ -492,7 +539,7 @@ mod tests {
             ),
             (
                 value(
-                    "doc",
+                    "r2",
                     "pressure",
                     Some(8.0),
                     Some(8.0),

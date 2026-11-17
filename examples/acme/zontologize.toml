@@ -76,6 +76,7 @@ extract = "claude-code:sonnet"
 classify = "claude-code:haiku"
 attributes = "claude-code:sonnet"
 curate = "claude-code:sonnet"
+eval = "claude-code:opus"
 embed = "local:multilingual-e5-small"
 # fit = "claude-code:haiku"
 # fit = "openrouter:anthropic/claude-haiku-5.5"
@@ -88,6 +89,8 @@ timeout_secs = 300
 max_window_use = 0.8
 config_dirs = []
 # config_dirs = ["~/.claude-a", "~/.claude-b"]
+account_window_use = {}
+# account_window_use = { "~/.claude-b" = 0.95 }
 
 [providers.openrouter]
 base_url = "https://openrouter.ai/api/v1"
@@ -128,6 +131,7 @@ min_chars = 100
 sources = []
 doc_types = []
 paths = []
+skip_paths = ["**/*_old.*", "**/archive/**"]
 exclude = []
 seed = "acme"
 max_per_document = 3
@@ -142,6 +146,9 @@ out = "extract"
 read_batch = 2000
 definition_chars = 200
 max_known = 0
+min_tag_words = 2
+repeated_line_files = 10
+quote_headers = ['(?i)-----\s*original message\s*-----']
 threads = 0
 
 [attributes]
@@ -159,6 +166,7 @@ paths = []
 seed = ""
 # resend_share = 0.2
 threads = 0
+min_line_words = 2
 
 [classify]
 head_chars = 1500
@@ -175,6 +183,13 @@ max_shortlist = 30
 definition_chars = 200
 out = "curate"
 
+folder_classes = []
+# folder_classes = ["acme:Project"]
+gazetteer = ""
+# gazetteer = "results/gazetteer.csv"
+gazetteer_documents = 3
+gazetteer_classes = []
+
 [curate.not_in_class]
 "acme:Site" = ["(?i)\\b(b\\.?v\\.?|n\\.?v\\.?)$"]
 
@@ -185,9 +200,30 @@ device = 0
 [review]
 sample = 50
 min_verdicts = 30
+checked = 0.8
+
+[run]
+summary = "results/summary.md"
+set = ""
+targets = { found = 0.9, duplicates = 0.05, class_accuracy = 0.9, mentions = 0.9, relations = 0.9, attributes = 0.85, catch_rate = 0.9 }
 
 [eval]
-world = ""
+dir = "eval"
+summary = "results/summary.md"
+seed = "eval"
+docs_per_kind = 3
+min_doc_chars = 200
+max_doc_chars = 6000
+request_chars = 60000
+questions = 25
+attribute_chunks = 300
+judge_batch = 10
+judge_context = 600
+judge_mentions = 100
+judge_relations = 100
+judge_attributes = 100
+planted = 20
+min_catch_rate = 0.9
 
 [embed]
 threads = 0
@@ -223,6 +259,7 @@ max_tokens = 128
 [resolve]
 strip_words = ["bv", "b v", "gmbh", "ltd", "inc"]
 fuzzy_score = 0.92
+fuzzy_auto = 1.01
 embed_score = 0.9
 max_candidates = 5
 max_block = 1000
