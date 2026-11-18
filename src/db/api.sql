@@ -1,5 +1,5 @@
 create or replace function {api}.contract_version() returns integer
-    language sql immutable as 'select 8';
+    language sql immutable as 'select 9';
 
 create or replace function {api}.tier(method text, status text, confidence double precision)
     returns text language sql immutable as $$
@@ -28,9 +28,10 @@ from {schema}.sources;
 create or replace view {api}.documents as
 select d.id, d.source_id, d.path, d.external_id, d.file, d.sha256, d.content_id, d.size,
     d.mtime, d.kind, d.doc_type, d.type_method, d.props, d.status, d.reason, s.dataset,
-    d.first_run_id, d.last_seen_run_id
+    d.first_run_id, d.last_seen_run_id, n.tsv as tsv_name
 from {schema}.documents d
 join {schema}.sources s on s.id = d.source_id
+left join {schema}.document_names n on n.document_id = d.id
 where d.status <> 'deleted';
 
 create or replace view {api}.pages as

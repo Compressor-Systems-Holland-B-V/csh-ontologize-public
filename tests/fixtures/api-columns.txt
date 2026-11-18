@@ -93,6 +93,7 @@ documents.reason
 documents.dataset
 documents.first_run_id
 documents.last_seen_run_id
+documents.tsv_name
 embedding_models.id
 embedding_models.name
 embedding_models.repo

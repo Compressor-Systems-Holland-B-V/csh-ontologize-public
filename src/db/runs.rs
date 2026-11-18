@@ -61,6 +61,9 @@ pub async fn take_lock(conn: &mut sqlx::PgConnection, schema: &str) -> Result<()
 }
 
 pub async fn unlock(conn: &mut sqlx::PgConnection, schema: &str) -> Result<()> {
+    if let Err(error) = super::document_names::refresh(conn).await {
+        eprintln!("schema {schema}: {error:#}");
+    }
     sqlx::query("select pg_advisory_unlock(hashtext('zontologize'), hashtext($1))")
         .bind(schema)
         .execute(&mut *conn)

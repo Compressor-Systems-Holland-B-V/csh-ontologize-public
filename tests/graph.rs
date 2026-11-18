@@ -419,7 +419,7 @@ async fn the_views_keep_their_contract() {
     let version = env
         .count(&format!("select {api}.contract_version()::bigint"))
         .await;
-    assert_eq!(version, 8);
+    assert_eq!(version, 9);
     for (method, status, confidence, tier) in [
         ("path", "auto", 1.0, "rule"),
         ("resolve:name", "auto", 1.0, "rule"),

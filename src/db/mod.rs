@@ -4,6 +4,7 @@ pub mod classify;
 pub mod contents;
 pub mod curate;
 pub mod decisions;
+pub mod document_names;
 pub mod documents;
 pub mod embed;
 pub mod entities;
