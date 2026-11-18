@@ -383,6 +383,12 @@ pub async fn eval_entities(
     Ok(ExitCode::SUCCESS)
 }
 
+pub async fn eval_types(config_dir: Option<&Path>, set: &str) -> Result<ExitCode> {
+    let scores = eval::types::run(config_dir, database_url().as_deref(), set).await?;
+    print!("{}", eval::types::report(&scores));
+    Ok(ExitCode::SUCCESS)
+}
+
 pub async fn eval_draft(
     config_dir: Option<&Path>,
     options: &eval::draft::DraftOptions,

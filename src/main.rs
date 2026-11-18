@@ -199,6 +199,11 @@ struct ExtractArgs {
         help = "Seed of the sample (default [llm_extract] seed)"
     )]
     seed: Option<String>,
+    #[arg(
+        long,
+        help = "Keep the facts of every chunk that has them as current, without sending anything"
+    )]
+    adopt: bool,
 }
 
 #[derive(Debug, clap::Args)]
@@ -224,6 +229,11 @@ struct AttributesArgs {
     seed: Option<String>,
     #[arg(long, help = "Only chunks the extract model has already answered")]
     extracted: bool,
+    #[arg(
+        long,
+        help = "Keep the values of every chunk that has them as current, without sending anything"
+    )]
+    adopt: bool,
 }
 
 #[derive(Debug, clap::Args)]
@@ -269,6 +279,17 @@ enum EvalCommand {
         world: Option<PathBuf>,
     },
     #[command(
+        about = "Compare the run's document classes with types.csv of a frozen gold set and write the numbers to [eval] summary"
+    )]
+    Types {
+        #[arg(
+            long,
+            value_name = "NAME",
+            help = "Gold set made by eval draft --what types; its newest version is used"
+        )]
+        set: String,
+    },
+    #[command(
         about = "Make a gold file from the documents with the eval model: grounded, made twice and judged"
     )]
     Draft {
@@ -277,7 +298,7 @@ enum EvalCommand {
         #[arg(
             long,
             value_name = "WHAT",
-            value_parser = ["world", "questions", "attributes"],
+            value_parser = ["world", "questions", "finds", "types", "attributes"],
             help = "Gold file to make"
         )]
         what: String,
@@ -505,6 +526,7 @@ fn main() -> ExitCode {
                 options.yes = args.yes;
                 options.sample = args.sample;
                 options.seed = args.seed;
+                options.adopt = args.adopt;
                 zontologize::extract(config, &options).await
             }
             Command::Attributes(args) => {
@@ -513,6 +535,7 @@ fn main() -> ExitCode {
                 options.sample = args.sample;
                 options.seed = args.seed;
                 options.extracted = args.extracted;
+                options.adopt = args.adopt;
                 zontologize::attributes(config, &options).await
             }
             Command::Embed(args) => {
@@ -531,6 +554,9 @@ fn main() -> ExitCode {
             }
             Command::Eval(EvalCommand::Entities { set, world }) => {
                 zontologize::eval_entities(config, set.as_deref(), world.as_deref()).await
+            }
+            Command::Eval(EvalCommand::Types { set }) => {
+                zontologize::eval_types(config, &set).await
             }
             Command::Eval(EvalCommand::Draft {
                 set,

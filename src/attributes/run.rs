@@ -220,6 +220,7 @@ impl Stage for Setup<'_> {
     type Checked = ChunkValues;
     const SAMPLED: &'static str = "chunks with a value and a subject";
     const WRITES: &'static str = "values";
+    const KEY_COLUMN: &'static str = "attr_key";
 
     fn base(&self) -> &Base<'_> {
         &self.base

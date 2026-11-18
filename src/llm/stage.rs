@@ -54,6 +54,7 @@ pub(crate) struct Keys<'a> {
 
 struct Todo {
     chunk_id: i64,
+    key: String,
     cache_key: String,
     chars: usize,
     resend: bool,
@@ -108,6 +109,7 @@ pub(crate) trait Stage {
     const WRITES: &'static str;
     const OWNER: Owner = Owner::Chunk;
     const FILTERED: bool = true;
+    const KEY_COLUMN: &'static str = "";
 
     fn base(&self) -> &Base<'_>;
     fn keys(item: &Self::Item) -> Keys<'_>;
@@ -180,6 +182,7 @@ async fn compare<S: Stage>(stage: &S, rows: &[Row], plan: &mut Plan) -> Result<(
         }
         plan.todo.push(Todo {
             chunk_id: row.id,
+            key: keys.key.to_string(),
             cache_key: keys.cache_key.to_string(),
             chars: keys.request.chars(),
             resend: row.key.is_some(),
@@ -335,6 +338,38 @@ async fn write_cached<S: Stage>(
     Ok(written)
 }
 
+fn adopted(todo: &[Todo]) -> (Vec<i64>, Vec<String>) {
+    todo.iter()
+        .filter(|t| t.resend)
+        .map(|t| (t.chunk_id, t.key.clone()))
+        .unzip()
+}
+
+async fn adopt<S: Stage>(stage: &S, plan: &Plan, dry_run: bool) -> Result<Outcome> {
+    let base = stage.base();
+    if S::KEY_COLUMN.is_empty() {
+        bail!("{} cannot adopt its results", base.task);
+    }
+    let (ids, keys) = adopted(&plan.todo);
+    if !dry_run {
+        db::llm::adopt_keys(base.pool, S::KEY_COLUMN, &ids, &keys).await?;
+    }
+    println!(
+        "{}: {} chunks with {} keep them as current{}; {} chunks without {} are left to a normal run",
+        base.task,
+        ids.len(),
+        S::WRITES,
+        if dry_run {
+            " (dry run, nothing written)"
+        } else {
+            ""
+        },
+        plan.todo.len() - ids.len(),
+        S::WRITES
+    );
+    Ok(Outcome::Finished)
+}
+
 pub(crate) async fn run<S: Stage>(stage: &S, options: &Options) -> Result<Outcome> {
     let base = stage.base();
     let pool = base.pool;
@@ -346,6 +381,9 @@ pub(crate) async fn run<S: Stage>(stage: &S, options: &Options) -> Result<Outcom
     let seed = options.seed.as_deref().unwrap_or(base.seed);
     let started = Instant::now();
     let plan = plan(stage, options.sample, seed).await?;
+    if options.adopt {
+        return adopt(stage, &plan, options.dry_run).await;
+    }
     let (cached, invalid) = split_known(pool, &plan.todo).await?;
     let resend = plan
         .todo
@@ -550,5 +588,28 @@ impl<S: Stage> Handler for Model<'_, S> {
             pending.clear();
         }
         self.stage.report(Some(self.job), &self.skipped).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn todo(chunk_id: i64, resend: bool) -> Todo {
+        Todo {
+            chunk_id,
+            key: format!("k{chunk_id}"),
+            cache_key: String::new(),
+            chars: 0,
+            resend,
+            order: (0, 0, chunk_id),
+        }
+    }
+
+    #[test]
+    fn only_chunks_with_results_are_adopted() {
+        let (ids, keys) = adopted(&[todo(1, true), todo(2, false), todo(3, true)]);
+        assert_eq!(ids, vec![1, 3]);
+        assert_eq!(keys, vec!["k1".to_string(), "k3".to_string()]);
     }
 }

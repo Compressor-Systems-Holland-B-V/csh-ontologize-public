@@ -1,6 +1,7 @@
 pub mod draft;
 pub mod gold;
 pub mod judge;
+pub mod types;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};

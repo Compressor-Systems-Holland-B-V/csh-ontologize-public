@@ -564,3 +564,19 @@ pub async fn totals(pool: &PgPool, job: i64) -> Result<(i64, i64, f64)> {
     .await?;
     Ok(row)
 }
+
+pub async fn adopt_keys(pool: &PgPool, column: &str, ids: &[i64], keys: &[String]) -> Result<()> {
+    if !matches!(column, "llm_key" | "attr_key") {
+        anyhow::bail!("no stage key column {column}");
+    }
+    let sql = format!(
+        "update chunks k set {column} = u.key from unnest($1::bigint[], $2::text[]) as u(id, key) \
+         where k.id = u.id"
+    );
+    sqlx::query(sqlx::AssertSqlSafe(sql))
+        .bind(ids)
+        .bind(keys)
+        .execute(pool)
+        .await?;
+    Ok(())
+}

@@ -160,14 +160,29 @@ pub async fn extract_pages(path: &Path, settings: &ExtractSettings) -> Result<Ve
     if uri.contains("://") {
         bail!("not a file path: {uri}");
     }
-    let mime = xberg::detect_mime_type(uri.clone(), true).unwrap_or_default();
+    let extension = super::walk::extension_of(&uri);
+    let really = match super::sniff::content(path, &extension) {
+        super::sniff::Content::Really(real) => Some(real),
+        _ => None,
+    };
+    let mime = match really {
+        Some(real) => xberg::detect_mime_type(format!("file.{real}"), false).unwrap_or_default(),
+        None => xberg::detect_mime_type(uri.clone(), true).unwrap_or_default(),
+    };
     let visual = mime == PDF_MIME || mime.starts_with("image/");
     let config = if visual {
         &settings.visual
     } else {
         &settings.xberg
     };
-    let input = ExtractInput::from_uri(uri);
+    let input = match really {
+        Some(real) => {
+            let bytes =
+                std::fs::read(path).with_context(|| format!("cannot read {}", path.display()))?;
+            ExtractInput::from_bytes(bytes, mime.clone(), Some(format!("file.{real}")))
+        }
+        None => ExtractInput::from_uri(uri),
+    };
     let result = xberg::extract(input, config)
         .await
         .with_context(|| format!("extraction failed: {}", path.display()))?;

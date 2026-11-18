@@ -148,6 +148,10 @@ async fn stage(
         "scan" => {
             let program = std::env::current_exe().context("cannot find the zontologize binary")?;
             crate::scan::run(config_dir, &[], url, &crate::scan::Options::new(program)).await?;
+            let pool = crate::db::pool::connect(url, &config.database.schema, 2).await?;
+            let reasons = crate::db::documents::skip_reasons(&pool).await?;
+            let textless = crate::db::documents::without_text(&pool).await?;
+            notes.push(skip_note(&reasons, textless));
             None
         }
         "classify" => Some(crate::classify::run(config_dir, url, &job).await?),
@@ -260,6 +264,19 @@ async fn numbers(
             numbers
         }
     }
+}
+
+pub fn skip_note(reasons: &[(String, i64)], textless: i64) -> String {
+    let skipped: Vec<String> = reasons
+        .iter()
+        .map(|(reason, count)| format!("{count} {reason}"))
+        .collect();
+    let skipped = if skipped.is_empty() {
+        "none".to_string()
+    } else {
+        skipped.join(", ")
+    };
+    format!("skipped: {skipped}; read without text: {textless}")
 }
 
 fn percent(value: Option<f64>) -> String {
@@ -448,6 +465,19 @@ pub async fn run(config_dir: Option<&Path>, options: &Options) -> Result<ExitCod
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn skip_note_lists_reasons_and_textless_files() {
+        let reasons = vec![
+            ("extension .zip".to_string(), 12),
+            ("binary content".to_string(), 1),
+        ];
+        assert_eq!(
+            skip_note(&reasons, 3),
+            "skipped: 12 extension .zip, 1 binary content; read without text: 3"
+        );
+        assert_eq!(skip_note(&[], 0), "skipped: none; read without text: 0");
+    }
 
     #[test]
     fn verdicts_follow_the_target_and_direction() {

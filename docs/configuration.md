@@ -240,6 +240,8 @@ The defaults work for most data. Commonly changed:
 | `eval.min_doc_chars` / `max_doc_chars` | `200` / `6000` | Documents with less text are left out; text sent per document |
 | `eval.request_chars` | `60000` | Most document text per gold request |
 | `eval.questions` | `25` | Questions per set made by `eval draft --what questions` |
+| `eval.finds` | `40` | Search queries per set made by `eval draft --what finds` |
+| `eval.type_docs` | `300` | Documents labelled with a class by `eval draft --what types` |
 | `eval.attribute_chunks` | `300` | Chunks labelled by `eval draft --what attributes` |
 | `eval.judge_batch` / `judge_context` | `10` / `600` | Claims per judge request; characters of text around a fact |
 | `eval.judge_mentions` / `judge_relations` / `judge_attributes` | `100` / `100` / `100` | Facts per kind the judge marks in `review sample --judge` |
@@ -307,7 +309,7 @@ section.
 
 ### Gold data
 
-`zontologize eval draft --set <name> --what world|questions|attributes [--folders a,b]` makes
+`zontologize eval draft --set <name> --what world|questions|finds|types|attributes [--folders a,b]` makes
 gold data from the raw text of the documents with `models.eval`, never from the entities. It
 writes `<eval.dir>/<name>/v<n>/`: the gold file, `documents.csv` and `report.md`. A version
 belongs to one set of documents (a hash of their paths and contents); while the documents stay
@@ -322,6 +324,15 @@ dropped.
 - `questions`: about `eval.questions` questions in the ontology's languages, each with the files
   that answer it, kept only when the model answers it from those files alone. `questions.toml` is
   read by `eval embed --questions <file>`.
+- `finds`: about `eval.finds` short search queries as a colleague types them in a search box
+  (a number, a name, a type with a project), each with the files it should find, kept only when
+  the model confirms from those files alone that they are what the query looks for. Grounded in
+  the file's path or text. `finds.toml` has the shape of `questions.toml`.
+- `types`: about `eval.type_docs` documents, spread over the folder types, each labelled twice
+  (in two orders) with the most specific subclass of `[ontology] document_class`, or `other`;
+  labels both passes agree on are gold, the judge decides the rest. `types.csv` (`path`, `class`)
+  is read by `zontologize eval types --set <name>`, which prints accuracy and precision and recall
+  per class of the run's document classes and writes them to `[eval] summary`.
 - `attributes`: a stratified sample of `attribute_chunks` chunks, labelled twice (the second time
   in reverse order) with equipment, property, value, unit and quote; values in one pass only go
   to the judge. Writes `attributes.csv` and the sample in `chunks.csv`.
@@ -411,6 +422,12 @@ on = "both"                  # path, text or both
 [[page_types]]               # split one file into parts by page
 doc_type = "invoice"
 pattern = '(?i)^invoice'
+
+[[name_types]]               # a document's class from its file name; doc_type (the folder) stays
+pattern = 'drawing|dwg'      # case-insensitive, on the file name only; the last matching rule wins
+class = "acme:Drawing"       # a document class; no match keeps the class of doc_type
+exclude = 'comment|review'   # optional: names that are not this document
+extensions = ["pdf", "dwg"]  # optional: only these extensions
 
 [pages]
 head_chars = 400             # page text searched for a page type

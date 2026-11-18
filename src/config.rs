@@ -416,6 +416,8 @@ pub struct EvalConfig {
     pub max_doc_chars: usize,
     pub request_chars: usize,
     pub questions: usize,
+    pub finds: usize,
+    pub type_docs: usize,
     pub attribute_chunks: usize,
     pub judge_batch: usize,
     pub judge_context: usize,

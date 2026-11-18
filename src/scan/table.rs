@@ -62,7 +62,8 @@ pub async fn scan_table(
                         mtime: walk::mtime(modified.into()),
                         sha256: sha256.map(|s| s.to_lowercase()),
                     };
-                    let decision = kinds.decide(&found.path, found.size.max(0) as u64);
+                    let full = root.join(found.file.as_deref().unwrap_or(&found.path));
+                    let decision = kinds.decide_file(&full, &found.path, found.size.max(0) as u64);
                     let existing = found.external_id.as_ref().and_then(|id| stored.get(id));
                     planned(existing, &found, &decision)
                 })

@@ -22,6 +22,12 @@ starts = true
 doc_type = "inspection_report"
 pattern = 'inspection report|inspectierapport'
 
+[[name_types]]
+pattern = 'drawing|\bdwg\b'
+class = "acme:Drawing"
+exclude = 'comment|review'
+extensions = ["pdf", "dwg"]
+
 [ocr_confusions]
 "0" = "Oo"
 "1" = "Il|"

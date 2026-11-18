@@ -227,6 +227,16 @@ pub async fn write(pool: &PgPool, source_id: i64, run_id: i64, rows: &[Row]) -> 
     let old = Columns::of(rows.iter().filter(|r| r.id.is_some()));
     if !old.ids.is_empty() {
         sqlx::query(
+            "update contents c set extract_key = null \
+             from documents d, unnest($1::bigint[], $2::text[]) as u(id, kind) \
+             where d.id = u.id and c.id = d.content_id and u.kind is not null \
+             and d.kind is distinct from u.kind",
+        )
+        .bind(&old.ids)
+        .bind(&old.kinds)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
             "update documents d set path = u.path, external_id = u.external_id, file = u.file, \
              sha256 = u.sha256, size = u.size, mtime = u.mtime, kind = u.kind, status = u.status, \
              reason = u.reason, content_id = c.id, last_seen_run_id = $1, deleted_run_id = null, \
@@ -383,6 +393,26 @@ pub fn parse_plan(text: &str) -> Result<Vec<Relocation>> {
         });
     }
     Ok(plan)
+}
+
+pub async fn skip_reasons(pool: &PgPool) -> Result<Vec<(String, i64)>> {
+    let rows = sqlx::query_as(
+        "select coalesce(reason, 'no reason'), count(*) from documents \
+         where status = 'skipped' group by 1 order by 2 desc, 1",
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
+pub async fn without_text(pool: &PgPool) -> Result<i64> {
+    let count = sqlx::query_scalar(
+        "select count(*) from documents d where d.status = 'present' \
+         and not exists (select 1 from chunks k where k.content_id = d.content_id)",
+    )
+    .fetch_one(pool)
+    .await?;
+    Ok(count)
 }
 
 #[cfg(test)]

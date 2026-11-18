@@ -2,7 +2,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 
-const BUILT_IN: [(&str, &str); 22] = [
+const BUILT_IN: [(&str, &str); 28] = [
     ("fit-system", include_str!("../../prompts/fit-system.md")),
     ("fit-user", include_str!("../../prompts/fit-user.md")),
     (
@@ -73,6 +73,30 @@ const BUILT_IN: [(&str, &str); 22] = [
     (
         "eval-answer-user",
         include_str!("../../prompts/eval-answer-user.md"),
+    ),
+    (
+        "eval-finds-system",
+        include_str!("../../prompts/eval-finds-system.md"),
+    ),
+    (
+        "eval-finds-user",
+        include_str!("../../prompts/eval-finds-user.md"),
+    ),
+    (
+        "eval-find-check-system",
+        include_str!("../../prompts/eval-find-check-system.md"),
+    ),
+    (
+        "eval-find-check-user",
+        include_str!("../../prompts/eval-find-check-user.md"),
+    ),
+    (
+        "eval-types-system",
+        include_str!("../../prompts/eval-types-system.md"),
+    ),
+    (
+        "eval-types-user",
+        include_str!("../../prompts/eval-types-user.md"),
     ),
     (
         "eval-attributes-system",

@@ -22,6 +22,9 @@ const WORLD_SCHEMA: &str = include_str!("../../prompts/eval-world-schema.json");
 const JOIN_SCHEMA: &str = include_str!("../../prompts/eval-join-schema.json");
 const QUESTIONS_SCHEMA: &str = include_str!("../../prompts/eval-questions-schema.json");
 const ANSWER_SCHEMA: &str = include_str!("../../prompts/eval-answer-schema.json");
+const TYPES_SCHEMA: &str = include_str!("../../prompts/eval-types-schema.json");
+const TYPE_CHARS: usize = 2000;
+const TYPE_EVIDENCE: usize = 600;
 const ATTRIBUTES_SCHEMA: &str = include_str!("../../prompts/eval-attributes-schema.json");
 const MAX_EVIDENCE: usize = 3;
 
@@ -29,16 +32,26 @@ const MAX_EVIDENCE: usize = 3;
 pub enum What {
     World,
     Questions,
+    Finds,
+    Types,
     Attributes,
 }
 
 impl What {
-    pub const ALL: [What; 3] = [What::World, What::Questions, What::Attributes];
+    pub const ALL: [What; 5] = [
+        What::World,
+        What::Questions,
+        What::Finds,
+        What::Types,
+        What::Attributes,
+    ];
 
     pub fn as_str(self) -> &'static str {
         match self {
             What::World => "world",
             What::Questions => "questions",
+            What::Finds => "finds",
+            What::Types => "types",
             What::Attributes => "attributes",
         }
     }
@@ -51,6 +64,8 @@ impl What {
         match self {
             What::World => "world.csv",
             What::Questions => "questions.toml",
+            What::Finds => "finds.toml",
+            What::Types => super::types::FILE,
             What::Attributes => "attributes.csv",
         }
     }
@@ -274,7 +289,9 @@ async fn draft(
     };
     let output = match what {
         What::World => world(&ctx, ontology, config_dir, &docs).await?,
-        What::Questions => questions(&ctx, config_dir, &docs).await?,
+        What::Questions => questions(&ctx, config_dir, &docs, &QUESTIONS).await?,
+        What::Finds => questions(&ctx, config_dir, &docs, &FINDS).await?,
+        What::Types => types(&ctx, ontology, config_dir, &docs).await?,
         What::Attributes => attributes(&ctx, config_dir, &docs).await?,
     };
     let Some(output) = output else {
@@ -897,36 +914,69 @@ fn spread_questions(questions: Vec<Question>, folders: usize, limit: usize) -> V
     out
 }
 
+struct Asking {
+    what: What,
+    prompt: &'static str,
+    check: &'static str,
+    with_path: bool,
+}
+
+const QUESTIONS: Asking = Asking {
+    what: What::Questions,
+    prompt: "eval-questions",
+    check: "eval-answer",
+    with_path: false,
+};
+
+const FINDS: Asking = Asking {
+    what: What::Finds,
+    prompt: "eval-finds",
+    check: "eval-find-check",
+    with_path: true,
+};
+
+fn seen_text(doc: &Doc, with_path: bool) -> String {
+    match with_path {
+        true => norm(&format!("{}\n{}", doc.path, doc.text)),
+        false => doc.normed.clone(),
+    }
+}
+
 async fn questions(
     ctx: &Ctx<'_>,
     config_dir: Option<&Path>,
     docs: &[Document],
+    asking: &Asking,
 ) -> Result<Option<Output>> {
     let config = ctx.config;
     let eval = &config.eval;
     let languages = config.ontology.languages.join(", ");
     let prompts = Prompts::load(
         config_dir,
-        "eval-questions",
+        asking.prompt,
         &["count", "languages", "documents"],
         "documents",
         QUESTIONS_SCHEMA,
     )?;
     let check = Prompts::load(
         config_dir,
-        "eval-answer",
+        asking.check,
         &["question", "documents"],
         "documents",
         ANSWER_SCHEMA,
     )?;
     let folders = folders(ctx, docs).await?;
-    let count = eval.questions.div_ceil(folders.len().max(1)).to_string();
+    let wanted = match asking.what {
+        What::Finds => eval.finds,
+        _ => eval.questions,
+    };
+    let count = wanted.div_ceil(folders.len().max(1)).to_string();
     let mut sent: Vec<(usize, Vec<&Doc>, Request)> = Vec::new();
     for (f, folder) in folders.iter().enumerate() {
         if let Some(part) = doc_batches(&folder.a, config).into_iter().next() {
             let block = documents_block(&part, eval.max_doc_chars);
             let request = prompts.request(
-                "eval-questions",
+                asking.prompt,
                 &[
                     ("count", &count),
                     ("languages", &languages),
@@ -937,10 +987,7 @@ async fn questions(
         }
     }
     let requests: Vec<Request> = sent.iter().map(|s| s.2.clone()).collect();
-    let Some(answers) = ctx
-        .ask::<QuestionsAnswer>("eval-questions", &requests)
-        .await?
-    else {
+    let Some(answers) = ctx.ask::<QuestionsAnswer>(asking.prompt, &requests).await? else {
         return Ok(None);
     };
     let mut dropped = 0;
@@ -951,10 +998,11 @@ async fn questions(
             continue;
         };
         proposed += answer.questions.len();
-        let shown: HashMap<&str, &str> = part
+        let texts: Vec<(&str, String)> = part
             .iter()
-            .map(|d| (d.path.as_str(), d.normed.as_str()))
+            .map(|d| (d.path.as_str(), seen_text(d, asking.with_path)))
             .collect();
+        let shown: HashMap<&str, &str> = texts.iter().map(|(p, t)| (*p, t.as_str())).collect();
         found.extend(ground_questions(*f, answer.questions, &shown, &mut dropped));
     }
     let by_path: HashMap<&str, &Doc> = folders
@@ -971,7 +1019,7 @@ async fn questions(
                 .filter_map(|f| by_path.get(f.as_str()).copied())
                 .collect();
             check.request(
-                "eval-answer",
+                asking.check,
                 &[
                     ("question", &q.text),
                     ("documents", &documents_block(&pages, eval.max_doc_chars)),
@@ -979,7 +1027,7 @@ async fn questions(
             )
         })
         .collect();
-    let Some(answers) = ctx.ask::<AnswerCheck>("eval-answer", &checks).await? else {
+    let Some(answers) = ctx.ask::<AnswerCheck>(asking.check, &checks).await? else {
         return Ok(None);
     };
     let mut failed = 0;
@@ -990,7 +1038,7 @@ async fn questions(
                 && question.files.iter().any(|f| {
                     by_path
                         .get(f.as_str())
-                        .is_some_and(|d| grounded(&d.normed, &a.quote))
+                        .is_some_and(|d| grounded(&seen_text(d, asking.with_path), &a.quote))
                 })
         });
         if ok {
@@ -999,7 +1047,7 @@ async fn questions(
             failed += 1;
         }
     }
-    let kept = spread_questions(passed, folders.len(), eval.questions);
+    let kept = spread_questions(passed, folders.len(), wanted);
     let mut per_language: BTreeMap<&str, usize> = BTreeMap::new();
     for q in &kept {
         *per_language.entry(q.language.as_str()).or_default() += 1;
@@ -1017,7 +1065,7 @@ async fn questions(
             })
             .collect(),
     };
-    let text = toml::to_string(&file).context("writing questions.toml")?;
+    let text = toml::to_string(&file).with_context(|| format!("writing {}", asking.what.file()))?;
     let report = format!(
         "- folders: {}\n- proposed: {proposed}; dropped by grounding: {dropped}; \
          not answered from the expected files alone: {failed}\n- kept: {} ({})\n",
@@ -1026,7 +1074,218 @@ async fn questions(
         languages_line.join(", ")
     );
     Ok(Some(Output {
-        files: vec![(What::Questions.file(), text)],
+        files: vec![(asking.what.file(), text)],
+        report,
+    }))
+}
+
+#[derive(Deserialize)]
+struct TypesAnswer {
+    labels: Vec<TypeItem>,
+}
+
+#[derive(Deserialize)]
+struct TypeItem {
+    file: String,
+    class: String,
+}
+
+fn document_classes(ontology: &Ontology, config: &Config) -> Vec<String> {
+    let Ok(root) = ontology.class(&config.ontology.document_class) else {
+        return Vec::new();
+    };
+    let mut out: Vec<String> = ontology
+        .classes
+        .values()
+        .filter(|c| c.selected && c.iri != root.iri && ontology.is_a(&c.iri, &root.iri))
+        .map(|c| c.iri.clone())
+        .collect();
+    out.sort();
+    out
+}
+
+fn type_labels(
+    items: Vec<TypeItem>,
+    shown: &HashSet<&str>,
+    classes: &HashSet<&str>,
+) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    for item in items {
+        let class = item.class.trim();
+        let known = class == super::types::OTHER || classes.contains(class);
+        if known && shown.contains(item.file.as_str()) {
+            out.entry(item.file).or_insert_with(|| class.to_string());
+        }
+    }
+    out
+}
+
+fn settle(
+    a: &HashMap<String, String>,
+    b: &HashMap<String, String>,
+) -> (BTreeMap<String, String>, BTreeMap<String, Vec<String>>) {
+    let mut agreed = BTreeMap::new();
+    let mut disputed: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for path in a.keys().chain(b.keys()) {
+        match (a.get(path), b.get(path)) {
+            (Some(x), Some(y)) if x == y => {
+                agreed.insert(path.clone(), x.clone());
+            }
+            (x, y) => {
+                let mut candidates: Vec<String> = x.into_iter().chain(y).cloned().collect();
+                candidates.dedup();
+                candidates.retain(|c| c != super::types::OTHER);
+                disputed.insert(path.clone(), candidates);
+            }
+        }
+    }
+    (agreed, disputed)
+}
+
+async fn types(
+    ctx: &Ctx<'_>,
+    ontology: &Ontology,
+    config_dir: Option<&Path>,
+    docs: &[Document],
+) -> Result<Option<Output>> {
+    let config = ctx.config;
+    let eval = &config.eval;
+    let classes = document_classes(ontology, config);
+    if classes.is_empty() {
+        bail!("eval draft types: [ontology] document_class has no selected subclasses");
+    }
+    let prompts = Prompts::load(
+        config_dir,
+        "eval-types",
+        &["pass", "classes", "documents"],
+        "documents",
+        TYPES_SCHEMA,
+    )?;
+    let judge_prompts = judge::prompts(config_dir)?;
+    let keys: Vec<(i64, &str)> = docs.iter().map(|d| (d.id, d.kind.as_str())).collect();
+    let kinds = keys
+        .iter()
+        .map(|k| k.1)
+        .collect::<HashSet<_>>()
+        .len()
+        .max(1);
+    let (a, b) = gold::split_sample(&keys, &eval.seed, eval.type_docs.div_ceil(2 * kinds));
+    let picked: HashSet<i64> = a.into_iter().chain(b).collect();
+    let chosen: Vec<&Document> = docs.iter().filter(|d| picked.contains(&d.id)).collect();
+    let contents: Vec<i64> = chosen.iter().map(|d| d.content_id).collect();
+    let texts = db::eval::texts(ctx.pool, &contents).await?;
+    let sample: Vec<Doc> = chosen
+        .iter()
+        .map(|d| {
+            let text = texts.get(&d.content_id).cloned().unwrap_or_default();
+            Doc {
+                path: d.path.clone(),
+                kind: d.kind.clone(),
+                normed: String::new(),
+                text: truncate(&text, TYPE_CHARS).to_string(),
+            }
+        })
+        .collect();
+    let class_lines =
+        crate::llm::shortlist::shortlist_lines(ontology, &classes, &ontology.languages, 200);
+    let mut sent: Vec<(usize, Vec<&Doc>, Request)> = Vec::new();
+    let reversed: Vec<&Doc> = sample.iter().rev().collect();
+    for (pass, order) in [sample.iter().collect::<Vec<&Doc>>(), reversed]
+        .into_iter()
+        .enumerate()
+    {
+        for part in batches(
+            &order,
+            |d| d.text.chars().count() + d.path.len(),
+            eval.request_chars,
+        ) {
+            let part: Vec<&Doc> = part.into_iter().copied().collect();
+            let block = documents_block(&part, TYPE_CHARS);
+            let request = prompts.request(
+                "eval-types",
+                &[
+                    ("pass", &(pass + 1).to_string()),
+                    ("classes", class_lines.trim_end()),
+                    ("documents", &block),
+                ],
+            );
+            sent.push((pass, part, request));
+        }
+    }
+    let requests: Vec<Request> = sent.iter().map(|s| s.2.clone()).collect();
+    let Some(answers) = ctx.ask::<TypesAnswer>("eval-types", &requests).await? else {
+        return Ok(None);
+    };
+    let class_set: HashSet<&str> = classes.iter().map(String::as_str).collect();
+    let mut passes = [HashMap::new(), HashMap::new()];
+    for (pass, part, request) in &sent {
+        let Some(answer) = parse::<TypesAnswer>(&answers, &ctx.key(request)) else {
+            continue;
+        };
+        let shown: HashSet<&str> = part.iter().map(|d| d.path.as_str()).collect();
+        passes[*pass].extend(type_labels(answer.labels, &shown, &class_set));
+    }
+    let (mut gold_types, disputed) = settle(&passes[0], &passes[1]);
+    let agreed = gold_types.len();
+    let by_path: HashMap<&str, &Doc> = sample.iter().map(|d| (d.path.as_str(), d)).collect();
+    let mut claims = Vec::new();
+    let mut claimed: Vec<(String, String)> = Vec::new();
+    for (path, candidates) in &disputed {
+        let evidence = by_path
+            .get(path.as_str())
+            .map(|d| truncate(&d.text, TYPE_EVIDENCE).to_string())
+            .unwrap_or_default();
+        for class in candidates {
+            let label = ontology.classes.get(class).map_or_else(
+                || class.clone(),
+                |c| crate::llm::shortlist::label(c, &ontology.languages),
+            );
+            claims.push(Claim {
+                text: format!("The file \"{path}\" as a whole is a {label}"),
+                evidence: format!("file: {path}\n{evidence}"),
+            });
+            claimed.push((path.clone(), class.clone()));
+        }
+    }
+    let Some(verdicts) = judge::judge(ctx, "eval-types-judge", &judge_prompts, &claims).await?
+    else {
+        return Ok(None);
+    };
+    let mut confirmed = 0;
+    for ((path, class), verdict) in claimed.into_iter().zip(&verdicts) {
+        if *verdict == Some(true) && !gold_types.contains_key(&path) {
+            gold_types.insert(path, class);
+            confirmed += 1;
+        }
+    }
+    let mut writer = csv::Writer::from_writer(Vec::new());
+    writer.write_record(["path", "class"])?;
+    let mut per_class: BTreeMap<&str, usize> = BTreeMap::new();
+    for (path, class) in &gold_types {
+        writer.write_record([path, class])?;
+        *per_class.entry(class.as_str()).or_default() += 1;
+    }
+    let text = String::from_utf8(writer.into_inner()?)?;
+    let counts: Vec<String> = per_class
+        .iter()
+        .map(|(class, n)| format!("{n} {}", super::types::short(class)))
+        .collect();
+    let report = format!(
+        "- documents labelled: {} in {} kinds, each twice\n\
+         - agreement: {agreed} of {} documents ({})\n\
+         - judged: {} claims on {} disputed documents, {confirmed} confirmed\n\
+         - gold: {} documents ({})\n",
+        sample.len(),
+        kinds,
+        sample.len(),
+        gold::percent(agreed, sample.len()),
+        claims.len(),
+        disputed.len(),
+        gold_types.len(),
+        counts.join(", ")
+    );
+    Ok(Some(Output {
+        files: vec![(What::Types.file(), text)],
         report,
     }))
 }
@@ -1320,6 +1579,60 @@ async fn attributes(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn labels(rows: &[(&str, &str)]) -> HashMap<String, String> {
+        rows.iter()
+            .map(|(a, b)| (a.to_string(), b.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn type_labels_keep_shown_files_and_known_classes() {
+        let shown: HashSet<&str> = ["a.pdf", "b.pdf", "c.pdf"].into_iter().collect();
+        let classes: HashSet<&str> = ["ex:Drawing"].into_iter().collect();
+        let items = vec![
+            TypeItem {
+                file: "a.pdf".to_string(),
+                class: " ex:Drawing ".to_string(),
+            },
+            TypeItem {
+                file: "b.pdf".to_string(),
+                class: "ex:Nope".to_string(),
+            },
+            TypeItem {
+                file: "c.pdf".to_string(),
+                class: "other".to_string(),
+            },
+            TypeItem {
+                file: "z.pdf".to_string(),
+                class: "ex:Drawing".to_string(),
+            },
+        ];
+        assert_eq!(
+            type_labels(items, &shown, &classes),
+            labels(&[("a.pdf", "ex:Drawing"), ("c.pdf", "other")])
+        );
+    }
+
+    #[test]
+    fn settle_keeps_agreement_and_disputes_the_rest() {
+        let a = labels(&[
+            ("a.pdf", "ex:PAndID"),
+            ("b.pdf", "ex:Drawing"),
+            ("c.pdf", "other"),
+        ]);
+        let b = labels(&[
+            ("a.pdf", "ex:PAndID"),
+            ("b.pdf", "ex:PAndID"),
+            ("d.pdf", "ex:Drawing"),
+        ]);
+        let (agreed, disputed) = settle(&a, &b);
+        assert_eq!(agreed.len(), 1);
+        assert_eq!(agreed["a.pdf"], "ex:PAndID");
+        assert_eq!(disputed["b.pdf"], vec!["ex:Drawing", "ex:PAndID"]);
+        assert!(disputed["c.pdf"].is_empty());
+        assert_eq!(disputed["d.pdf"], vec!["ex:Drawing"]);
+    }
 
     fn found(name: &str, class: &str, variants: &[&str]) -> Found {
         Found {

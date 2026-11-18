@@ -38,6 +38,7 @@ pub struct Options {
     pub sample: Option<usize>,
     pub seed: Option<String>,
     pub extracted: bool,
+    pub adopt: bool,
     pub backoff: Option<Duration>,
 }
 
@@ -54,6 +55,7 @@ impl Options {
             sample: None,
             seed: None,
             extracted: false,
+            adopt: false,
             backoff: None,
         }
     }

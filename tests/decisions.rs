@@ -302,3 +302,55 @@ async fn decisions_apply_undo_and_keep_command_line_reviews() {
     );
     env.finish().await;
 }
+
+#[tokio::test]
+#[ignore]
+async fn undoing_a_class_decision_restores_the_class_under_a_later_decision() {
+    let env = setup("decisions_undo_class").await;
+    let site = format!("{ACME}Site");
+    decide(
+        &env,
+        1,
+        Row {
+            value: Some(&site),
+            ..row("class", "Project", "P-2024-0001")
+        },
+    )
+    .await;
+    decide(
+        &env,
+        2,
+        Row {
+            value: Some("Harbour site"),
+            ..row("name", "Site", "P-2024-0001")
+        },
+    )
+    .await;
+    assert_eq!(apply(&env).await.applied, 2);
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+        "delete from {}_app.decisions where id = 1",
+        env.schema
+    )))
+    .execute(&env.pool)
+    .await
+    .unwrap();
+    let report = apply(&env).await;
+    let outcome = report
+        .decisions
+        .iter()
+        .find(|d| d.id == 2)
+        .map(|d| d.outcome);
+    assert_eq!(outcome, Some(Outcome::NotFound), "{report:?}");
+    let as_project = visible(
+        &env,
+        "select count(*) from {api}.canonical_entities where key = 'P-2024-0001' \
+         and class_iri = 'https://example.org/acme#Project'",
+    )
+    .await;
+    assert_eq!(as_project, 1);
+    assert_eq!(
+        env.count("select count(*) from decision_overrides").await,
+        0
+    );
+    env.finish().await;
+}

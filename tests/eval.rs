@@ -93,7 +93,7 @@ async fn gold_env(name: &str) -> Env {
         "[models]\neval = \"claude-code:opus\"\n\
          [providers.claude-code]\nconcurrency = 1\n\
          [eval]\ndir = \"{}\"\nsummary = \"{}\"\nmin_doc_chars = 10\ndocs_per_kind = 1\n\
-         questions = 2\njudge_mentions = 3\njudge_relations = 3\njudge_attributes = 3\n\
+         questions = 2\nfinds = 2\njudge_mentions = 3\njudge_relations = 3\njudge_attributes = 3\n\
          planted = 2\n{}",
         env.dir.join("gold").display(),
         env.dir.join("summary.md").display(),
@@ -182,6 +182,25 @@ async fn eval_draft_questions_keep_only_answered_ones() {
     assert_eq!(questions.len(), 1, "{questions:?}");
     assert_eq!(questions[0].expect, vec!["Gamma/note.txt".to_string()]);
     let report = std::fs::read_to_string(env.dir.join("gold/q1/v1/report.md")).unwrap();
+    assert!(report.contains("dropped by grounding: 1"), "{report}");
+    assert!(report.contains("expected files alone: 1"), "{report}");
+    env.finish().await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn eval_draft_finds_keep_queries_grounded_in_the_name_or_text() {
+    let env = gold_env("eval_draft_finds").await;
+    assert_eq!(
+        draft(&env, "f1", What::Finds, "Gamma").await,
+        Outcome::Finished
+    );
+    let path = env.dir.join("gold/f1/v1/finds.toml");
+    let finds = zontologize::embed::eval::read_questions_file(&path).unwrap();
+    assert_eq!(finds.len(), 1, "{finds:?}");
+    assert_eq!(finds[0].expect, vec!["Gamma/note.txt".to_string()]);
+    let report = std::fs::read_to_string(env.dir.join("gold/f1/v1/report.md")).unwrap();
+    assert!(report.contains("## finds"), "{report}");
     assert!(report.contains("dropped by grounding: 1"), "{report}");
     assert!(report.contains("expected files alone: 1"), "{report}");
     env.finish().await;

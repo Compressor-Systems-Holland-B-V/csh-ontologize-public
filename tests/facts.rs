@@ -296,6 +296,38 @@ async fn a_check_change_replays_the_cache_without_yes() {
     env.finish().await;
 }
 
+#[tokio::test]
+#[ignore]
+async fn adopt_keeps_facts_as_current_without_calls() {
+    let env = setup_extract("facts_adopt").await;
+    assert_eq!(extract(&env, &options()).await.unwrap(), Outcome::Finished);
+    let facts = env.count(MODEL_FACTS).await;
+    let calls = env.count("select count(*) from llm_calls").await;
+    sqlx::query("update chunks set llm_key = 'older prompt' where llm_key is not null")
+        .execute(&env.pool)
+        .await
+        .unwrap();
+    sqlx::query("delete from llm_cache")
+        .execute(&env.pool)
+        .await
+        .unwrap();
+    let mut adopt = options();
+    adopt.adopt = true;
+    assert_eq!(extract(&env, &adopt).await.unwrap(), Outcome::Finished);
+    assert_eq!(env.count("select count(*) from llm_calls").await, calls);
+    assert_eq!(env.count(MODEL_FACTS).await, facts);
+    assert_eq!(
+        env.count("select count(*) from chunks where llm_key = 'older prompt'")
+            .await,
+        0
+    );
+    let mut dry = options();
+    dry.dry_run = true;
+    assert_eq!(extract(&env, &dry).await.unwrap(), Outcome::DryRun);
+    assert_eq!(env.count("select count(*) from llm_calls").await, calls);
+    env.finish().await;
+}
+
 async fn known_setup(name: &str) -> (Env, i64) {
     let env = Env::new(name).await;
     env.file(
@@ -321,9 +353,10 @@ async fn known_names(env: &Env, chunk: i64) -> Vec<String> {
 
 #[tokio::test]
 #[ignore]
-async fn known_offers_the_document_project_customer_and_site() {
+async fn known_stays_the_same_when_resolve_picks_another_main_entity() {
     let (env, chunk) = known_setup("facts_known").await;
-    let mut names = known_names(&env, chunk).await;
+    let before = known_names(&env, chunk).await;
+    let mut names = before.clone();
     names.sort();
     assert_eq!(
         names,
@@ -339,12 +372,7 @@ async fn known_offers_the_document_project_customer_and_site() {
     .execute(&env.pool)
     .await
     .unwrap();
-    let mut names = known_names(&env, chunk).await;
-    names.sort();
-    assert_eq!(
-        names,
-        ["Brixwell Root", "Kelmar", "P-2021-0042 Brixwell Pumps"]
-    );
+    assert_eq!(known_names(&env, chunk).await, before);
     env.finish().await;
 }
 

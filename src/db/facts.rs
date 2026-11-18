@@ -65,6 +65,7 @@ pub struct DocEntity {
     pub chunk_id: i64,
     pub entity_id: i64,
     pub class_iri: String,
+    pub doc_type: Option<String>,
 }
 
 pub struct ChunkFacts {
@@ -152,16 +153,18 @@ const KNOWN: &str = "with chunk as (select k.id as chunk_id, k.content_id, d.id 
     join relations r on r.src_id = f.entity_id or r.dst_id = f.entity_id \
     where r.status <> 'rejected' and r.property_iri <> $5 \
     and r.method not like $2 and r.method not like $3 \
+    and r.method not like 'curate:%' and r.method <> 'human' \
     union all select c.chunk_id, 4, m.entity_id from chunk c \
     join chunks o on o.content_id = c.content_id and o.id <> c.chunk_id \
     join rule_mentions m on m.chunk_id = o.id), \
-    best as (select f.chunk_id, coalesce(e.canonical_id, e.id) as root, min(f.rank) as rank \
+    best as (select f.chunk_id, f.entity_id, min(f.rank) as rank \
     from found f join entities e on e.id = f.entity_id \
     where e.document_id is null or e.key <> e.document_id::text group by 1, 2), \
-    numbered as (select chunk_id, root, \
-    row_number() over (partition by chunk_id order by rank, root) as n from best) \
+    numbered as (select b.chunk_id, b.entity_id, row_number() over \
+    (partition by b.chunk_id order by b.rank, e.class_iri, e.key) as n \
+    from best b join entities e on e.id = b.entity_id) \
     select n.chunk_id, e.id as entity_id, e.class_iri, e.name from numbered n \
-    join entities e on e.id = n.root where n.n <= $6 order by n.chunk_id, n.n";
+    join entities e on e.id = n.entity_id where n.n <= $6 order by n.chunk_id, n.n";
 
 pub async fn known(pool: &PgPool, ids: &[i64], max_known: usize) -> Result<Vec<KnownRow>> {
     let rows = sqlx::query_as(KNOWN)
@@ -177,14 +180,14 @@ pub async fn known(pool: &PgPool, ids: &[i64], max_known: usize) -> Result<Vec<K
 }
 
 const DOC_ENTITIES: &str = "with segment as (select k.id as chunk_id, e.id as entity_id, \
-    e.class_iri from chunks k join contents c on c.id = k.content_id \
+    e.class_iri, null::text as doc_type from chunks k join contents c on c.id = k.content_id \
     join segments s on s.content_id = k.content_id \
     and coalesce(k.page_from, 1) between s.page_from and s.page_to \
     join entities e on e.key = c.sha256 || '#' || s.ord \
     where k.id = any($1)) \
-    select chunk_id, entity_id, class_iri from segment \
+    select chunk_id, entity_id, class_iri, doc_type from segment \
     union all \
-    select k.id, e.id, e.class_iri from chunks k \
+    select k.id, e.id, e.class_iri, d.doc_type from chunks k \
     join documents d on d.content_id = k.content_id and d.status = 'present' \
     join entities e on e.document_id = d.id and e.key = d.id::text \
     where k.id = any($1) and not exists (select 1 from segment g where g.chunk_id = k.id) \
@@ -198,11 +201,16 @@ pub async fn doc_entities(conn: &mut PgConnection, ids: &[i64]) -> Result<Vec<Do
     Ok(rows)
 }
 
-pub async fn doc_classes(pool: &PgPool, ids: &[i64]) -> Result<HashMap<i64, String>> {
+pub async fn doc_classes(
+    pool: &PgPool,
+    ids: &[i64],
+) -> Result<HashMap<i64, (String, Option<String>)>> {
     let mut conn = pool.acquire().await?;
     let mut classes = HashMap::new();
     for row in doc_entities(&mut conn, ids).await? {
-        classes.entry(row.chunk_id).or_insert(row.class_iri);
+        classes
+            .entry(row.chunk_id)
+            .or_insert((row.class_iri, row.doc_type));
     }
     Ok(classes)
 }

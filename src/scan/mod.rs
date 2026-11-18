@@ -2,6 +2,7 @@ pub mod chunk;
 pub mod extract;
 pub mod memory;
 pub mod pool;
+pub mod sniff;
 pub mod table;
 pub mod walk;
 pub mod worker;
@@ -572,7 +573,7 @@ async fn scan_folder(
                     mtime: file.mtime,
                     sha256: None,
                 };
-                let decision = kinds.decide(&found.path, file.size);
+                let decision = kinds.decide_file(&root.join(&found.path), &found.path, file.size);
                 planned(stored.get(&found.path), &found, &decision)
             })
             .collect();
@@ -1047,7 +1048,8 @@ fn document_output(rules: &Rules, doc: entities::DocumentWork) -> entities::Docu
     }
     let document_class = facts.as_ref().and_then(|f| {
         rules
-            .document_class_for(f.doc_type.as_deref())
+            .name_class(&doc.path)
+            .or_else(|| rules.document_class_for(f.doc_type.as_deref()))
             .map(str::to_string)
     });
     entities::DocumentOutput {

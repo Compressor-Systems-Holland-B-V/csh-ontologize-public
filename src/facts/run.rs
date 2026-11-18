@@ -25,6 +25,7 @@ pub use crate::llm::job::{Options, Outcome};
 struct Setup<'a> {
     base: Base<'a>,
     ontology: Arc<Ontology>,
+    rules: Arc<crate::rules::Rules>,
     exclude: Arc<Vec<String>>,
     system: Arc<Prompt>,
     user: Arc<Prompt>,
@@ -120,6 +121,7 @@ pub async fn run(
         normaliser: Arc::new(Normaliser::new(&config.resolve.strip_words)),
         lines: Arc::new(lines),
         ontology: ontology.clone(),
+        rules: Arc::new(rules),
         exclude: Arc::new(exclude),
         system: Arc::new(system),
         user: Arc::new(user),
@@ -135,12 +137,10 @@ pub async fn run(
     result
 }
 
-async fn inputs(
-    pool: &PgPool,
-    ids: &[i64],
-    max_known: usize,
-    lines: &Lines,
-) -> Result<Vec<(ChunkInput, ChunkRow)>> {
+async fn inputs(setup: &Setup<'_>, ids: &[i64]) -> Result<Vec<(ChunkInput, ChunkRow)>> {
+    let pool = setup.base.pool;
+    let max_known = setup.base.config.llm_extract.max_known;
+    let lines = &setup.lines;
     let rows = db::facts::chunks(pool, ids).await?;
     let mut counts = counts_by_chunk(db::fit::class_counts(pool, ids).await?);
     let mut known: HashMap<i64, Vec<Known>> = HashMap::new();
@@ -162,21 +162,24 @@ async fn inputs(
                 pages: row.pages(),
                 counts: counts.remove(&row.id).unwrap_or_default(),
                 known: known.remove(&row.id).unwrap_or_default(),
-                doc_class: docs.remove(&row.id),
+                doc_class: docs.remove(&row.id).map(|(class, doc_type)| {
+                    prompt_class(&setup.rules, class, doc_type.as_deref())
+                }),
             };
             (input, row)
         })
         .collect())
 }
 
+fn prompt_class(rules: &crate::rules::Rules, class: String, doc_type: Option<&str>) -> String {
+    match doc_type.and_then(|t| rules.doc_types.get(t)) {
+        Some(folder) => folder.clone(),
+        None => class,
+    }
+}
+
 async fn prepare(setup: &Setup<'_>, ids: &[i64]) -> Result<Vec<Prepared>> {
-    let pairs = inputs(
-        setup.base.pool,
-        ids,
-        setup.base.config.llm_extract.max_known,
-        &setup.lines,
-    )
-    .await?;
+    let pairs = inputs(setup, ids).await?;
     let config = setup.base.config;
     let ontology = setup.ontology.clone();
     let system = setup.system.clone();
@@ -219,6 +222,7 @@ impl Stage for Setup<'_> {
     type Checked = ChunkFacts;
     const SAMPLED: &'static str = "eligible chunks";
     const WRITES: &'static str = "facts";
+    const KEY_COLUMN: &'static str = "llm_key";
 
     fn base(&self) -> &Base<'_> {
         &self.base

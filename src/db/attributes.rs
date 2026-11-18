@@ -74,9 +74,9 @@ pub async fn eligible(
 
 pub async fn known(pool: &PgPool, ids: &[i64]) -> Result<Vec<KnownRow>> {
     let rows = sqlx::query_as(
-        "select distinct m.chunk_id, e.id as entity_id, e.class_iri, e.name from mentions m \
+        "select distinct m.chunk_id, e.id as entity_id, e.class_iri, e.key, e.name from mentions m \
          join entities e on e.id = m.entity_id where m.chunk_id = any($1) \
-         and m.method <> $2 order by m.chunk_id, e.id",
+         and m.method <> $2 order by m.chunk_id, e.class_iri, e.key, e.id",
     )
     .bind(ids)
     .bind(SEGMENT_METHOD)

@@ -6,6 +6,9 @@ case "$input" in
 "Documents to read for the world list."*"=== file: Alpha/order two.txt"*) cat "$dir/eval-world-order.jsonl" ;;
 "Entities to join"*) cat "$dir/eval-join-empty.jsonl" ;;
 "Documents to write questions about."*) cat "$dir/eval-questions.jsonl" ;;
+"Documents to write search queries for."*) cat "$dir/eval-finds.jsonl" ;;
+"Search query: levering"*) cat "$dir/eval-answer-no.jsonl" ;;
+"Search query:"*) cat "$dir/eval-answer-yes.jsonl" ;;
 "Question to answer: Waar"*) cat "$dir/eval-answer-no.jsonl" ;;
 "Question to answer:"*) cat "$dir/eval-answer-yes.jsonl" ;;
 "Chunks to label (pass "*)

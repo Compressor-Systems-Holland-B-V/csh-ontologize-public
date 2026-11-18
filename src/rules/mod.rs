@@ -1,5 +1,6 @@
 pub mod gazetteer;
 pub mod ids;
+pub mod names;
 pub mod numbers;
 pub mod pages;
 pub mod path;
@@ -56,6 +57,8 @@ struct RulesFile {
     ocr_confusions: BTreeMap<String, String>,
     #[serde(default)]
     page_types: Vec<pages::PageTypeSpec>,
+    #[serde(default)]
+    name_types: Vec<names::NameTypeSpec>,
     pages: Option<pages::PagesSpec>,
     #[serde(default)]
     revisions: Vec<RevisionSpec>,
@@ -167,6 +170,7 @@ pub struct Rules {
     pub ids: ids::IdPatterns,
     pub confusions: ids::Confusions,
     pub page_types: pages::PageTypes,
+    pub name_types: Vec<names::NameType>,
     pub part_property: Option<String>,
     pub lexicon: gazetteer::Lexicon,
     pub revisions: Vec<Revision>,
@@ -304,6 +308,11 @@ pub fn compile(
     let head_chars = pages.head_chars.unwrap_or_default();
     let page_types = pages::PageTypes::compile(&file.page_types, &doc_types, head_chars)
         .map_err(|e| anyhow::anyhow!("{rules_name}: {e}"))?;
+    let folder_classes: Vec<&String> = document_class.iter().chain(doc_types.values()).collect();
+    let name_types = names::compile(&file.name_types, ontology, |iri| {
+        folder_classes.iter().any(|class| ontology.is_a(iri, class))
+    })
+    .map_err(|e| anyhow::anyhow!("{rules_name}: {e}"))?;
     let part_property = pages.part_property.unwrap_or_default();
     let part_property = part_property_iri(
         &part_property,
@@ -354,6 +363,7 @@ pub fn compile(
         ids,
         confusions,
         page_types,
+        name_types,
         part_property,
         lexicon,
         revisions,
@@ -456,6 +466,10 @@ impl Rules {
             .iter()
             .chain(self.doc_types.values())
             .any(|class| ontology.is_a(iri, class))
+    }
+
+    pub fn name_class(&self, path: &str) -> Option<&str> {
+        names::class_of(&self.name_types, path)
     }
 
     pub fn document_class_for(&self, doc_type: Option<&str>) -> Option<&str> {
@@ -747,6 +761,30 @@ pub(crate) mod tests {
     fn unknown_doc_type_class_is_an_error() {
         let error = rules("[doc_types]\nreport = \"ex:Nope\"\n").err().unwrap();
         assert!(format!("{error}").contains("doc_types.report"), "{error}");
+    }
+
+    #[test]
+    fn name_types_give_a_class_on_top_of_the_folder() {
+        let loaded = rules(
+            "[doc_types]\nreport = \"ex:Report\"\n\n\
+             [[name_types]]\npattern = 'summary'\nclass = \"ex:Report\"\n",
+        )
+        .unwrap();
+        let onto = ontology();
+        let report = onto.class("ex:Report").unwrap().iri.clone();
+        let document = onto.class("ex:Document").unwrap().iri.clone();
+        assert_eq!(loaded.name_class("a/Summary.pdf"), Some(report.as_str()));
+        assert_eq!(loaded.name_class("a/other.pdf"), None);
+        assert_eq!(
+            loaded.document_class_for(Some("report")),
+            Some(report.as_str())
+        );
+        assert_ne!(report, document);
+        let error = rules("[[name_types]]\npattern = 'x'\nclass = \"ex:Pump\"\n")
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(error.contains("name_types[0]"), "{error}");
     }
 
     #[test]

@@ -207,7 +207,7 @@ pub async fn override_entity(
     sqlx::query(
         "insert into decision_overrides select entity_id, class_iri, name, method, status, \
          confidence, ontology_version_id from entity_classes where entity_id = $1 \
-         on conflict do nothing",
+         and method <> 'human' on conflict do nothing",
     )
     .bind(entity_id)
     .execute(&mut *conn)

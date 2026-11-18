@@ -39,6 +39,17 @@ pub async fn documents(pool: &PgPool) -> Result<Vec<Document>> {
     Ok(rows)
 }
 
+pub async fn document_classes(pool: &PgPool) -> Result<Vec<(String, String, Option<String>)>> {
+    let rows = sqlx::query_as(
+        "select d.path, e.class_iri, d.doc_type from documents d \
+         join entities e on e.document_id = d.id and e.key = d.id::text \
+         where d.status = 'present' order by d.path, e.id",
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
 pub async fn texts(pool: &PgPool, contents: &[i64]) -> Result<HashMap<i64, String>> {
     let rows: Vec<(i64, String)> = sqlx::query_as(
         "select content_id, string_agg(text, E'\\n' order by page_no) from pages \

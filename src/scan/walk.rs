@@ -9,6 +9,7 @@ use sha2::{Digest, Sha256};
 use sqlx::types::chrono::{DateTime, Utc};
 use tokio::sync::mpsc;
 
+use super::sniff;
 use crate::config::KindConfig;
 use crate::hash::hex;
 
@@ -64,6 +65,40 @@ impl Kinds {
         }
         Decision::Read(kind.clone())
     }
+
+    pub fn decide_file(&self, file: &Path, path: &str, size: u64) -> Decision {
+        let decision = self.decide(path, size);
+        let Decision::Read(kind) = &decision else {
+            return decision;
+        };
+        let extension = extension_of(path);
+        if !sniff::sniffed(&extension) {
+            return decision;
+        }
+        match sniff::content(file, &extension) {
+            sniff::Content::AsNamed => decision,
+            sniff::Content::Really(real) => match self.by_extension.get(real) {
+                Some((real_kind, _)) => Decision::Read(real_kind.clone()),
+                None => skip(kind, "binary content".to_string()),
+            },
+            sniff::Content::Unsupported(name) => skip(kind, format!("unsupported format {name}")),
+            sniff::Content::Binary => skip(kind, "binary content".to_string()),
+        }
+    }
+}
+
+fn skip(kind: &str, reason: String) -> Decision {
+    Decision::Skip {
+        kind: Some(kind.to_string()),
+        reason,
+    }
+}
+
+pub fn extension_of(path: &str) -> String {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    name.rsplit_once('.')
+        .map(|(_, extension)| extension.to_lowercase())
+        .unwrap_or_default()
 }
 
 pub fn globs(patterns: &[String]) -> Result<GlobSet> {
@@ -250,6 +285,35 @@ mod tests {
                 reason: "no extension".to_string()
             }
         );
+    }
+
+    #[test]
+    fn decide_file_reads_by_content() {
+        let dir = std::env::temp_dir().join(format!("decide-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let text = dir.join("plain.txt");
+        std::fs::write(&text, "a made-up note").unwrap();
+        let pdf = dir.join("really.txt");
+        std::fs::write(&pdf, b"%PDF-1.4\n\0\x01").unwrap();
+        let junk = dir.join("junk.txt");
+        std::fs::write(&junk, b"\x01\0\x02\x03").unwrap();
+        let kinds = kinds();
+        assert_eq!(
+            kinds.decide_file(&text, "plain.txt", 14),
+            Decision::Read("text".to_string())
+        );
+        assert_eq!(
+            kinds.decide_file(&pdf, "really.txt", 14),
+            Decision::Read("pdf".to_string())
+        );
+        assert_eq!(
+            kinds.decide_file(&junk, "junk.txt", 4),
+            Decision::Skip {
+                kind: Some("text".to_string()),
+                reason: "binary content".to_string()
+            }
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

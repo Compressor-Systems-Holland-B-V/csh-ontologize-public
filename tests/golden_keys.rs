@@ -55,7 +55,7 @@ fn scan_stage_keys_are_unchanged() {
     );
     let ontology = acme_ontology(&config);
     let rules = rules::load(Some(&acme()), &ontology, &config.ontology.document_class).unwrap();
-    assert_eq!(rules.key, "rules-v7-c6a5a8c54a6d5257");
+    assert_eq!(rules.key, "rules-v7-0b8fae79da895dc9");
 }
 
 #[test]
